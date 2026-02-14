@@ -7,7 +7,7 @@ read_when:
 title: "在線狀態"
 ---
 
-> 此文件為 [English Version](/concepts/presence) 的繁體中文版本。
+> 此文件為 [English Version](/concepts/presence_zh_TW) 的繁體中文版本。
 
 # 在線狀態 (Presence)
 

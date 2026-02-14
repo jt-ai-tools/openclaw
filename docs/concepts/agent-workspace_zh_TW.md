@@ -6,7 +6,7 @@ read_when:
 title: "代理人工作區"
 ---
 
-> 此文件為 [English Version](/concepts/agent-workspace) 的繁體中文版本。
+> 此文件為 [English Version](/concepts/agent-workspace_zh_TW) 的繁體中文版本。
 
 # 代理人工作區 (Agent workspace)
 

@@ -4,7 +4,7 @@ summary: 針對 OpenClaw 高風險路徑進行機器查核的安全性模型。
 permalink: /security/formal-verification/
 ---
 
-> 此文件為 [English Version](/security/formal-verification) 的繁體中文版本。
+> 此文件為 [English Version](/security/formal-verification_zh_TW) 的繁體中文版本。
 
 # 形式驗證 (安全性模型)
 

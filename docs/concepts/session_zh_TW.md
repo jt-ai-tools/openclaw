@@ -5,7 +5,7 @@ read_when:
 title: "會話管理"
 ---
 
-> 此文件為 [English Version](/concepts/session) 的繁體中文版本。
+> 此文件為 [English Version](/concepts/session_zh_TW) 的繁體中文版本。
 
 # 會話管理 (Session Management)
 

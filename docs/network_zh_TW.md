@@ -7,7 +7,7 @@ read_when:
 title: "網路 (Network)"
 ---
 
-> 此文件為 [English Version](/network) 的繁體中文版本。
+> 此文件為 [English Version](/network_zh_TW) 的繁體中文版本。
 
 # 網路中心 (Network hub)
 

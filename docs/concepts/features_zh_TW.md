@@ -5,7 +5,7 @@ read_when:
 title: "功能特性"
 ---
 
-> 此文件為 [English Version](/concepts/features) 的繁體中文版本。
+> 此文件為 [English Version](/concepts/features_zh_TW) 的繁體中文版本。
 
 ## 功能亮點
 

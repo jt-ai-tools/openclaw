@@ -5,7 +5,7 @@ read_when:
 title: "對談會話"
 ---
 
-> 此文件為 [English Version](/concepts/sessions) 的繁體中文版本。
+> 此文件為 [English Version](/concepts/sessions_zh_TW) 的繁體中文版本。
 
 # 對談會話 (Sessions)
 

@@ -7,7 +7,7 @@ read_when:
 title: "OpenProse"
 ---
 
-> 此文件為 [English Version](/prose) 的繁體中文版本。
+> 此文件為 [English Version](/prose_zh_TW) 的繁體中文版本。
 
 # OpenProse
 

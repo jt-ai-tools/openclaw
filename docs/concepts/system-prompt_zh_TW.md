@@ -6,7 +6,7 @@ read_when:
 title: "系統提示詞"
 ---
 
-> 此文件為 [English Version](/concepts/system-prompt) 的繁體中文版本。
+> 此文件為 [English Version](/concepts/system-prompt_zh_TW) 的繁體中文版本。
 
 # 系統提示詞 (System Prompt)
 

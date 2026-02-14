@@ -5,7 +5,7 @@ read_when:
 title: "OpenClaw"
 ---
 
-> 此文件為 [English Version](/index) 的繁體中文版本。
+> 此文件為 [English Version](/index_zh_TW) 的繁體中文版本。
 
 # OpenClaw 🦞
 

@@ -5,7 +5,7 @@ read_when:
 title: "對談工具"
 ---
 
-> 此文件為 [English Version](/concepts/session-tool) 的繁體中文版本。
+> 此文件為 [English Version](/concepts/session-tool_zh_TW) 的繁體中文版本。
 
 # 對談工具 (Session Tools)
 

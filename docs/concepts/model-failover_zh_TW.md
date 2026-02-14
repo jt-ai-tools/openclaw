@@ -6,7 +6,7 @@ read_when:
 title: "模型容錯移轉"
 ---
 
-> 此文件為 [English Version](/concepts/model-failover) 的繁體中文版本。
+> 此文件為 [English Version](/concepts/model-failover_zh_TW) 的繁體中文版本。
 
 # 模型容錯移轉 (Model failover)
 

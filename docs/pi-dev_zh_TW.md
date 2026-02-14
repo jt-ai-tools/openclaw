@@ -2,7 +2,7 @@
 title: "Pi 開發工作流 (Pi Development Workflow)"
 ---
 
-> 此文件為 [English Version](/pi-dev) 的繁體中文版本。
+> 此文件為 [English Version](/pi-dev_zh_TW) 的繁體中文版本。
 
 # Pi 開發工作流 (Pi Development Workflow)
 

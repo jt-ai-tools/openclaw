@@ -6,7 +6,7 @@ read_when:
 title: "日期與時間"
 ---
 
-> 此文件為 [English Version](/date-time) 的繁體中文版本。
+> 此文件為 [English Version](/date-time_zh_TW) 的繁體中文版本。
 
 # 日期與時間 (Date & Time)
 

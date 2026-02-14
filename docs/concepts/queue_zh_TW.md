@@ -5,7 +5,7 @@ read_when:
 title: "指令佇列"
 ---
 
-> 此文件為 [English Version](/concepts/queue) 的繁體中文版本。
+> 此文件為 [English Version](/concepts/queue_zh_TW) 的繁體中文版本。
 
 # 指令佇列 (Command Queue)
 

@@ -3,7 +3,7 @@ title: "OpenClaw 威脅模型 v1.0"
 summary: "基於 MITRE ATLAS 框架的 OpenClaw 威脅分析"
 ---
 
-> 此文件為 [English Version](/security/THREAT-MODEL-ATLAS) 的繁體中文版本。
+> 此文件為 [English Version](/security/THREAT-MODEL-ATLAS_zh_TW) 的繁體中文版本。
 
 # OpenClaw 威脅模型 v1.0
 

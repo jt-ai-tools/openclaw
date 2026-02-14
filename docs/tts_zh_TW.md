@@ -7,7 +7,7 @@ read_when:
 title: "文字轉語音 (TTS)"
 ---
 
-> 此文件為 [English Version](/tts) 的繁體中文版本。
+> 此文件為 [English Version](/tts_zh_TW) 的繁體中文版本。
 
 # 文字轉語音 (TTS)
 

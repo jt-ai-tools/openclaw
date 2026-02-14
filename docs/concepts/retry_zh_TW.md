@@ -6,7 +6,7 @@ read_when:
 title: "重試原則"
 ---
 
-> 此文件為 [English Version](/concepts/retry) 的繁體中文版本。
+> 此文件為 [English Version](/concepts/retry_zh_TW) 的繁體中文版本。
 
 # 重試原則 (Retry policy)
 

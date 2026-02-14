@@ -7,7 +7,7 @@ read_when:
 title: "串流與分塊"
 ---
 
-> 此文件為 [English Version](/concepts/streaming) 的繁體中文版本。
+> 此文件為 [English Version](/concepts/streaming_zh_TW) 的繁體中文版本。
 
 # 串流與分塊 (Streaming + chunking)
 

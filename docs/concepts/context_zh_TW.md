@@ -7,7 +7,7 @@ read_when:
 title: "上下文"
 ---
 
-> 此文件為 [English Version](/concepts/context) 的繁體中文版本。
+> 此文件為 [English Version](/concepts/context_zh_TW) 的繁體中文版本。
 
 # 上下文 (Context)
 

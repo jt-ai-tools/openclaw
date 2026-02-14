@@ -6,7 +6,7 @@ read_when:
 title: "Perplexity Sonar"
 ---
 
-> 此文件為 [English Version](/perplexity) 的繁體中文版本。
+> 此文件為 [English Version](/perplexity_zh_TW) 的繁體中文版本。
 
 # Perplexity Sonar
 

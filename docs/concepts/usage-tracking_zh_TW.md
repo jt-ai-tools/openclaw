@@ -6,7 +6,7 @@ read_when:
 title: "用量追蹤"
 ---
 
-> 此文件為 [English Version](/concepts/usage-tracking) 的繁體中文版本。
+> 此文件為 [English Version](/concepts/usage-tracking_zh_TW) 的繁體中文版本。
 
 # 用量追蹤 (Usage tracking)
 

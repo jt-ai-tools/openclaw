@@ -6,7 +6,7 @@ read_when:
 title: "時區"
 ---
 
-> 此文件為 [English Version](/concepts/timezone) 的繁體中文版本。
+> 此文件為 [English Version](/concepts/timezone_zh_TW) 的繁體中文版本。
 
 # 時區 (Timezones)
 
@@ -89,4 +89,4 @@ OpenClaw 規範化了時間戳記，使模型能看到 **單一的參考時間**
 
 您可以使用 `agents.defaults.timeFormat` (`auto` | `12` | `24`) 控制提示詞格式。
 
-完整的行為與範例請參閱 [日期與時間 (Date & Time)](/date-time)。
+完整的行為與範例請參閱 [日期與時間 (Date & Time)](/date-time_zh_TW)。

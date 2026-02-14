@@ -3,7 +3,7 @@ title: "參與威脅模型貢獻"
 summary: "如何參與 OpenClaw 威脅模型的維護與改進"
 ---
 
-> 此文件為 [English Version](/security/CONTRIBUTING-THREAT-MODEL) 的繁體中文版本。
+> 此文件為 [English Version](/security/CONTRIBUTING-THREAT-MODEL_zh_TW) 的繁體中文版本。
 
 # 參與 OpenClaw 威脅模型貢獻
 

@@ -6,7 +6,7 @@ read_when:
 title: "VPS 託管"
 ---
 
-> 此文件為 [English Version](/vps) 的繁體中文版本。
+> 此文件為 [English Version](/vps_zh_TW) 的繁體中文版本。
 
 # VPS 託管 (VPS hosting)
 

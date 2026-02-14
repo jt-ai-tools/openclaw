@@ -5,7 +5,7 @@ read_when:
 title: "閘道器架構"
 ---
 
-> 此文件為 [English Version](/concepts/architecture) 的繁體中文版本。
+> 此文件為 [English Version](/concepts/architecture_zh_TW) 的繁體中文版本。
 
 # 閘道器架構
 

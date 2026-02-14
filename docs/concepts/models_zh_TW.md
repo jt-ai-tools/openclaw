@@ -7,7 +7,7 @@ read_when:
 title: "模型 CLI"
 ---
 
-> 此文件為 [English Version](/concepts/models) 的繁體中文版本。
+> 此文件為 [English Version](/concepts/models_zh_TW) 的繁體中文版本。
 
 # 模型 CLI (Models CLI)
 

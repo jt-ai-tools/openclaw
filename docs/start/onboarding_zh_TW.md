@@ -7,7 +7,7 @@ title: "引導設定 (macOS App)"
 sidebarTitle: "引導設定：macOS App"
 ---
 
-> 此文件為 [English Version](/start/onboarding) 的繁體中文版本。
+> 此文件為 [English Version](/start/onboarding_zh_TW) 的繁體中文版本。
 
 # 引導設定 (macOS App)
 

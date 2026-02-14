@@ -7,7 +7,7 @@ read_when:
 title: "記錄機制 (Logging)"
 ---
 
-> 此文件為 [English Version](/logging) 的繁體中文版本。
+> 此文件為 [English Version](/logging_zh_TW) 的繁體中文版本。
 
 # 記錄機制 (Logging)
 

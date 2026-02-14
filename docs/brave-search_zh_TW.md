@@ -6,7 +6,7 @@ read_when:
 title: "Brave Search"
 ---
 
-> 此文件為 [English Version](/brave-search) 的繁體中文版本。
+> 此文件為 [English Version](/brave-search_zh_TW) 的繁體中文版本。
 
 # Brave Search API
 

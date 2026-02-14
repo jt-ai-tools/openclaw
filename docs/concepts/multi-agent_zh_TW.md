@@ -5,7 +5,7 @@ read_when: "您想在單一閘道器程序中執行多個隔離的代理人（�
 status: active
 ---
 
-> 此文件為 [English Version](/concepts/multi-agent) 的繁體中文版本。
+> 此文件為 [English Version](/concepts/multi-agent_zh_TW) 的繁體中文版本。
 
 # 多代理人路由 (Multi-Agent Routing)
 

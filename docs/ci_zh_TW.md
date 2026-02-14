@@ -3,7 +3,7 @@ title: CI 管線 (CI Pipeline)
 description: OpenClaw CI 管線的工作原理
 ---
 
-> 此文件為 [English Version](/ci) 的繁體中文版本。
+> 此文件為 [English Version](/ci_zh_TW) 的繁體中文版本。
 
 # CI 管線 (CI Pipeline)
 

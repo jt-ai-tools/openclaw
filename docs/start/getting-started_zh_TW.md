@@ -6,7 +6,7 @@ read_when:
 title: "新手入門"
 ---
 
-> 此文件為 [English Version](/start/getting-started) 的繁體中文版本。
+> 此文件為 [English Version](/start/getting-started_zh_TW) 的繁體中文版本。
 
 # 新手入門
 

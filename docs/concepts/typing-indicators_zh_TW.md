@@ -5,7 +5,7 @@ read_when:
 title: "輸入指示器"
 ---
 
-> 此文件為 [English Version](/concepts/typing-indicators) 的繁體中文版本。
+> 此文件為 [English Version](/concepts/typing-indicators_zh_TW) 的繁體中文版本。
 
 # 輸入指示器 (Typing indicators)
 

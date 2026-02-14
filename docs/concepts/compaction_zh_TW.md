@@ -6,7 +6,7 @@ read_when:
 title: "壓縮機制"
 ---
 
-> 此文件為 [English Version](/concepts/compaction) 的繁體中文版本。
+> 此文件為 [English Version](/concepts/compaction_zh_TW) 的繁體中文版本。
 
 # 上下文視窗與壓縮機制 (Compaction)
 

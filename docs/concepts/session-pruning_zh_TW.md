@@ -6,7 +6,7 @@ read_when:
   - 您正在調整 agents.defaults.contextPruning 時
 ---
 
-> 此文件為 [English Version](/concepts/session-pruning) 的繁體中文版本。
+> 此文件為 [English Version](/concepts/session-pruning_zh_TW) 的繁體中文版本。
 
 # 工作階段裁剪 (Session Pruning)
 

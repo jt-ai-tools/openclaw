@@ -6,7 +6,7 @@ read_when:
 title: "模型提供者"
 ---
 
-> 此文件為 [English Version](/concepts/model-providers) 的繁體中文版本。
+> 此文件為 [English Version](/concepts/model-providers_zh_TW) 的繁體中文版本。
 
 # 模型提供者 (Model providers)
 

@@ -2,7 +2,7 @@
 title: "Pi 整合架構 (Pi Integration Architecture)"
 ---
 
-> 此文件為 [English Version](/pi) 的繁體中文版本。
+> 此文件為 [English Version](/pi_zh_TW) 的繁體中文版本。
 
 # Pi 整合架構 (Pi Integration Architecture)
 
