@@ -5,7 +5,7 @@ read_when:
 title: "Slack"
 ---
 
-> 此文件為 [English Version](/channels/slack) 的繁體中文版本。
+> 此文件為 [English Version](/channels/slack_zh_TW) 的繁體中文版本。
 
 # Slack
 

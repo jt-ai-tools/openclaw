@@ -5,7 +5,7 @@ read_when:
 title: "群組"
 ---
 
-> 此文件為 [English Version](/channels/groups) 的繁體中文版本。
+> 此文件為 [English Version](/channels/groups_zh_TW) 的繁體中文版本。
 
 # 群組 (Groups)
 
@@ -40,7 +40,7 @@ requireMention 是否為 yes?
 否則 -> 進行回覆
 ```
 
-![群組訊息流程](/images/groups-flow.svg)
+![群組訊息流程](/images/groups-flow_zh_TW.svg)
 
 如果您想要...
 

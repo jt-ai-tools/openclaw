@@ -6,7 +6,7 @@ read_when:
 title: "通訊頻道"
 ---
 
-> 此文件為 [English Version](/channels/index) 的繁體中文版本。
+> 此文件為 [English Version](/channels/index_zh_TW) 的繁體中文版本。
 
 # 通訊頻道 (Chat Channels)
 

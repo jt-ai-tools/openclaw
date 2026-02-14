@@ -7,7 +7,7 @@ read_when:
 title: "配對"
 ---
 
-> 此文件為 [English Version](/channels/pairing) 的繁體中文版本。
+> 此文件為 [English Version](/channels/pairing_zh_TW) 的繁體中文版本。
 
 # 配對 (Pairing)
 

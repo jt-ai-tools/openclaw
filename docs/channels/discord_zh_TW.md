@@ -5,7 +5,7 @@ read_when:
 title: "Discord"
 ---
 
-> 此文件為 [English Version](/channels/discord) 的繁體中文版本。
+> 此文件為 [English Version](/channels/discord_zh_TW) 的繁體中文版本。
 
 # Discord (機器人 API)
 

@@ -5,7 +5,7 @@ read_when:
 title: "WhatsApp"
 ---
 
-> 此文件為 [English Version](/channels/whatsapp) 的繁體中文版本。
+> 此文件為 [English Version](/channels/whatsapp_zh_TW) 的繁體中文版本。
 
 # WhatsApp (網頁頻道)
 

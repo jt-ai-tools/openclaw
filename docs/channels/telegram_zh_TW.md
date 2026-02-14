@@ -5,7 +5,7 @@ read_when:
 title: "Telegram"
 ---
 
-> 此文件為 [English Version](/channels/telegram) 的繁體中文版本。
+> 此文件為 [English Version](/channels/telegram_zh_TW) 的繁體中文版本。
 
 # Telegram (機器人 API)
 

@@ -6,7 +6,7 @@ read_when:
 title: "Signal"
 ---
 
-> 此文件為 [English Version](/channels/signal) 的繁體中文版本。
+> 此文件為 [English Version](/channels/signal_zh_TW) 的繁體中文版本。
 
 # Signal (signal-cli)
 

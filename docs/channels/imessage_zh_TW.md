@@ -6,7 +6,7 @@ read_when:
 title: "iMessage"
 ---
 
-> 此文件為 [English Version](/channels/imessage) 的繁體中文版本。
+> 此文件為 [English Version](/channels/imessage_zh_TW) 的繁體中文版本。
 
 # iMessage (舊版：imsg)
 

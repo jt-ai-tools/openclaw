@@ -5,7 +5,7 @@ read_when:
 title: "Google Chat"
 ---
 
-> 此文件為 [English Version](/channels/googlechat) 的繁體中文版本。
+> 此文件為 [English Version](/channels/googlechat_zh_TW) 的繁體中文版本。
 
 # Google Chat (Chat API)
 

@@ -6,7 +6,7 @@ read_when:
 title: "頻道故障排除"
 ---
 
-> 此文件為 [English Version](/channels/troubleshooting) 的繁體中文版本。
+> 此文件為 [English Version](/channels/troubleshooting_zh_TW) 的繁體中文版本。
 
 # 頻道故障排除
 
