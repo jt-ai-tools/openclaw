@@ -93,47 +93,45 @@
 - [x] docs/concepts/session-tool.md
 - [x] docs/concepts/streaming.md
 - [x] docs/concepts/system-prompt.md
-- [ ] docs/concepts/typebox.md
-- [ ] docs/concepts/typing-indicators.md
-- [ ] docs/concepts/usage-tracking.md
+- [x] docs/concepts/typebox.md
+- [x] docs/concepts/typing-indicators.md
+- [x] docs/concepts/usage-tracking.md
+- [x] docs/concepts/model-providers.md
+- [x] docs/concepts/timezone.md
+- [x] docs/concepts/session-pruning.md
+
+### 其它說明文件 (Other Docs - /docs)
+- [x] docs/date-time.md
+- [x] docs/logging.md
+- [x] docs/network.md
+- [x] docs/prose.md
+- [x] docs/vps.md
+- [x] docs/tts.md
+- [ ] docs/brave-search.md
+- [ ] docs/ci.md
+- [ ] docs/perplexity.md
+- [ ] docs/pi-dev.md
+- [ ] docs/pi.md
+
+### 外掛程式文件 (Extensions - /extensions)
+- [x] extensions/*/README.md
+- [x] extensions/msteams/CHANGELOG.md (功能說明)
+- [x] extensions/matrix/CHANGELOG.md (功能說明)
+- [x] extensions/open-prose/skills/prose/prose.md (VM 語義)
+- [x] extensions/open-prose/skills/prose/SKILL.md
+
+### 技能文件 (Skills - /skills)
+- [x] skills/*/SKILL.md (全數完成)
+- [x] 1password 參考文件
+- [x] himalaya 參考文件
+- [x] local-places 參考文件
 
 ## 執行紀錄 (Execution Log)
 - 2026-02-13: 初始化 PROGRESS.md。
-- 2026-02-13: 完成 Root 核心文件翻譯。
-- 2026-02-13: 完成 docs/gateway/ 全目錄翻譯 (30+ 文件)。
-- 2026-02-13: 完成部分 docs/start/ 與 docs/concepts/ 翻譯。
-- 2026-02-13: 完成 docs/security/ 全目錄翻譯。
-- 2026-02-13: 完成 docs/channels/index.md 翻譯。
-- 2026-02-13: 完成 docs/channels/whatsapp.md 翻譯為 docs/channels/whatsapp_zh_TW.md。
-- 2026-02-13: 完成 docs/channels/telegram.md 翻譯為 docs/channels/telegram_zh_TW.md。
-- 2026-02-13: 完成 docs/channels/discord.md 翻譯為 docs/channels/discord_zh_TW.md。
-- 2026-02-13: 完成 docs/channels/slack.md 翻譯為 docs/channels/slack_zh_TW.md。
-- 2026-02-13: 完成 docs/channels/signal.md 翻譯為 docs/channels/signal_zh_TW.md。
-- 2026-02-13: 完成 docs/channels/imessage.md 翻譯為 docs/channels/imessage_zh_TW.md。
-- 2026-02-13: 完成 docs/channels/googlechat.md 翻譯為 docs/channels/googlechat_zh_TW.md。
-- 2026-02-13: 完成 docs/channels/pairing.md 翻譯為 docs/channels/pairing_zh_TW.md。
-- 2026-02-13: 完成 docs/channels/groups.md 翻譯為 docs/channels/groups_zh_TW.md。
-- 2026-02-13: 完成 docs/channels/troubleshooting.md 翻譯為 docs/channels/troubleshooting_zh_TW.md。
-- 2026-02-13: 完成 docs/automation/cron-jobs.md 翻譯為 docs/automation/cron-jobs_zh_TW.md。
-- 2026-02-13: 完成 docs/automation/webhook.md 翻譯為 docs/automation/webhook_zh_TW.md。
-- 2026-02-13: 完成 docs/automation/gmail-pubsub.md 翻譯為 docs/automation/gmail-pubsub_zh_TW.md。
-- 2026-02-13: 完成 docs/automation/poll.md 翻譯為 docs/automation/poll_zh_TW.md。
-- 2026-02-13: 完成 docs/automation/hooks.md 翻譯為 docs/automation/hooks_zh_TW.md。
-- 2026-02-13: 完成 docs/automation/auth-monitoring.md 翻譯為 docs/automation/auth-monitoring_zh_TW.md。
-- 2026-02-13: 完成 docs/concepts/agent-loop.md 翻譯為 docs/concepts/agent-loop_zh_TW.md。
-- 2026-02-13: 完成 docs/concepts/agent-workspace.md 翻譯為 docs/concepts/agent-workspace_zh_TW.md。
-- 2026-02-13: 完成 docs/concepts/presence.md 翻譯為 docs/concepts/presence_zh_TW.md。
-- 2026-02-13: 完成 docs/concepts/session.md 翻譯為 docs/concepts/session_zh_TW.md。
-- 2026-02-13: 完成 docs/concepts/sessions.md 翻譯為 docs/concepts/sessions_zh_TW.md。
-- 2026-02-13: 完成 docs/concepts/session-tool.md 翻譯為 docs/concepts/session-tool_zh_TW.md。
-- 2026-02-13: 完成 docs/concepts/streaming.md 翻譯為 docs/concepts/streaming_zh_TW.md。
-- 2026-02-13: 完成 docs/concepts/system-prompt.md 翻譯為 docs/concepts/system-prompt_zh_TW.md。
-- 2026-02-13: 完成 docs/concepts/queue.md 翻譯為 docs/concepts/queue_zh_TW.md。
-- 2026-02-13: 完成 docs/concepts/retry.md 翻譯為 docs/concepts/retry_zh_TW.md。
-- 2026-02-13: 完成 docs/concepts/compaction.md 翻譯為 docs/concepts/compaction_zh_TW.md。
-- 2026-02-13: 完成 docs/concepts/features.md 翻譯為 docs/concepts/features_zh_TW.md。
-- 2026-02-13: 完成 docs/concepts/messages.md 翻譯為 docs/concepts/messages_zh_TW.md。
-- 2026-02-13: 完成 docs/concepts/models.md 翻譯為 docs/concepts/models_zh_TW.md。
-- 2026-02-13: 完成 docs/concepts/model-failover.md 翻譯為 docs/concepts/model-failover_zh_TW.md。
-- 2026-02-13: 完成 docs/concepts/multi-agent.md 翻譯為 docs/concepts/multi-agent_zh_TW.md。
-- 2026-02-13: 完成 docs/concepts/context.md 翻譯為 docs/concepts/context_zh_TW.md。
+- 2026-02-13: 完成 Root 核心文件、docs/gateway、docs/security 等翻譯。
+- 2026-02-14: 完成 docs/concepts、docs/ 根目錄雜項文件翻譯。
+- 2026-02-14: 完成 extensions/ 全目錄核心說明文件翻譯。
+- 2026-02-14: 完成 skills/ 全目錄技能說明文件翻譯。
+- 2026-02-14: 提交所有翻譯成果。
+
+
