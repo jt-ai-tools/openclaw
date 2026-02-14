@@ -6,7 +6,7 @@ read_when:
 title: "Tailscale"
 ---
 
-> 此文件為 [English Version](/gateway/tailscale) 的繁體中文版本。
+> 此文件為 [English Version](/gateway/tailscale_zh_TW) 的繁體中文版本。
 
 # Tailscale (閘道器儀表板)
 

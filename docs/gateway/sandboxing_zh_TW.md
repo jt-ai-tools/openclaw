@@ -5,7 +5,7 @@ read_when: "您需要沙箱功能的專屬說明，或需要調整 agents.defaul
 status: active
 ---
 
-> 此文件為 [English Version](/gateway/sandboxing) 的繁體中文版本。
+> 此文件為 [English Version](/gateway/sandboxing_zh_TW) 的繁體中文版本。
 
 # 沙箱 (Sandboxing)
 

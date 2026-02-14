@@ -5,7 +5,7 @@ read_when:
 title: "遠端存取"
 ---
 
-> 此文件為 [English Version](/gateway/remote) 的繁體中文版本。
+> 此文件為 [English Version](/gateway/remote_zh_TW) 的繁體中文版本。
 
 # 遠端存取 (SSH、隧道與 Tailnets)
 

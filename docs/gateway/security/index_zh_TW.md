@@ -5,7 +5,7 @@ read_when:
 title: "安全性"
 ---
 
-> 此文件為 [English Version](/gateway/security/index) 的繁體中文版本。
+> 此文件為 [English Version](/gateway/security/index_zh_TW) 的繁體中文版本。
 
 # 安全性 🔒
 

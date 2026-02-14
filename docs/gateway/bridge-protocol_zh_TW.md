@@ -7,7 +7,7 @@ read_when:
 title: "橋接通訊協定 (舊版)"
 ---
 
-> 此文件為 [English Version](/gateway/bridge-protocol) 的繁體中文版本。
+> 此文件為 [English Version](/gateway/bridge-protocol_zh_TW) 的繁體中文版本。
 
 # 橋接通訊協定 (舊版節點傳輸)
 

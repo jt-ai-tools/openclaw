@@ -7,7 +7,7 @@ read_when:
 title: "發現機制與傳輸方式"
 ---
 
-> 此文件為 [English Version](/gateway/discovery) 的繁體中文版本。
+> 此文件為 [English Version](/gateway/discovery_zh_TW) 的繁體中文版本。
 
 # 發現機制與傳輸方式
 

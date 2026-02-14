@@ -6,7 +6,7 @@ read_when:
 title: "Bonjour 發現機制"
 ---
 
-> 此文件為 [English Version](/gateway/bonjour) 的繁體中文版本。
+> 此文件為 [English Version](/gateway/bonjour_zh_TW) 的繁體中文版本。
 
 # Bonjour / mDNS 發現機制
 

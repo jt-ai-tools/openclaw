@@ -6,7 +6,7 @@ read_when:
 title: "記錄"
 ---
 
-> 此文件為 [English Version](/gateway/logging) 的繁體中文版本。
+> 此文件為 [English Version](/gateway/logging_zh_TW) 的繁體中文版本。
 
 # 記錄 (Logging)
 

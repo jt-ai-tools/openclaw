@@ -6,7 +6,7 @@ read_when:
 title: "Doctor 指令"
 ---
 
-> 此文件為 [English Version](/gateway/doctor) 的繁體中文版本。
+> 此文件為 [English Version](/gateway/doctor_zh_TW) 的繁體中文版本。
 
 # Doctor 指令
 

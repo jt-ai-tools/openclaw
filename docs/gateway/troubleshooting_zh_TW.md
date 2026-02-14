@@ -6,7 +6,7 @@ read_when:
 title: "故障排除"
 ---
 
-> 此文件為 [English Version](/gateway/troubleshooting) 的繁體中文版本。
+> 此文件為 [English Version](/gateway/troubleshooting_zh_TW) 的繁體中文版本。
 
 # 閘道器故障排除
 

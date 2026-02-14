@@ -7,7 +7,7 @@ read_when:
 title: "CLI 後端"
 ---
 
-> 此文件為 [English Version](/gateway/cli-backends) 的繁體中文版本。
+> 此文件為 [English Version](/gateway/cli-backends_zh_TW) 的繁體中文版本。
 
 # CLI 後端 (備援執行環境)
 

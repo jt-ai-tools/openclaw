@@ -6,7 +6,7 @@ read_when:
 title: "閘道器鎖定"
 ---
 
-> 此文件為 [English Version](/gateway/gateway-lock) 的繁體中文版本。
+> 此文件為 [English Version](/gateway/gateway-lock_zh_TW) 的繁體中文版本。
 
 # 閘道器鎖定 (Gateway lock)
 

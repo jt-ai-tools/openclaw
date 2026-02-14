@@ -6,7 +6,7 @@ read_when:
 title: "背景 Exec 與程序工具"
 ---
 
-> 此文件為 [English Version](/gateway/background-process) 的繁體中文版本。
+> 此文件為 [English Version](/gateway/background-process_zh_TW) 的繁體中文版本。
 
 # 背景 Exec 與程序工具 (Process Tool)
 

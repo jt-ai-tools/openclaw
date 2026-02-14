@@ -7,7 +7,7 @@ read_when:
 title: "閘道器擁有的配對"
 ---
 
-> 此文件為 [English Version](/gateway/pairing) 的繁體中文版本。
+> 此文件為 [English Version](/gateway/pairing_zh_TW) 的繁體中文版本。
 
 # 閘道器擁有的配對 (選項 B)
 

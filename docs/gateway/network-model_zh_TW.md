@@ -5,7 +5,7 @@ read_when:
 title: "網路模型"
 ---
 
-> 此文件為 [English Version](/gateway/network-model) 的繁體中文版本。
+> 此文件為 [English Version](/gateway/network-model_zh_TW) 的繁體中文版本。
 
 大多數的操作皆透過閘道器 (`openclaw gateway`) 進行，這是一個長期執行的程序，負責管理通訊頻道連線與 WebSocket 控制平面。
 

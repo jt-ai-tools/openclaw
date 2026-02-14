@@ -7,7 +7,7 @@ read_when:
 title: "閘道器通訊協定"
 ---
 
-> 此文件為 [English Version](/gateway/protocol) 的繁體中文版本。
+> 此文件為 [English Version](/gateway/protocol_zh_TW) 的繁體中文版本。
 
 # 閘道器通訊協定 (WebSocket)
 

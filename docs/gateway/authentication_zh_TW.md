@@ -6,7 +6,7 @@ read_when:
 title: "驗證"
 ---
 
-> 此文件為 [English Version](/gateway/authentication) 的繁體中文版本。
+> 此文件為 [English Version](/gateway/authentication_zh_TW) 的繁體中文版本。
 
 # 驗證 (Authentication)
 

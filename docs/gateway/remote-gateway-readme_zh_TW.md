@@ -4,7 +4,7 @@ read_when: "透過 SSH 將 macOS App 連接至遠端閘道器時"
 title: "遠端閘道器設定"
 ---
 
-> 此文件為 [English Version](/gateway/remote-gateway-readme) 的繁體中文版本。
+> 此文件為 [English Version](/gateway/remote-gateway-readme_zh_TW) 的繁體中文版本。
 
 # 使用遠端閘道器執行 OpenClaw.app
 

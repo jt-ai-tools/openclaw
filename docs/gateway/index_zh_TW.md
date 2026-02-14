@@ -5,7 +5,7 @@ read_when:
 title: "閘道器執行手冊"
 ---
 
-> 此文件為 [English Version](/gateway/index) 的繁體中文版本。
+> 此文件為 [English Version](/gateway/index_zh_TW) 的繁體中文版本。
 
 # 閘道器執行手冊
 

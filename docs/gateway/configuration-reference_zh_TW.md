@@ -3,7 +3,7 @@ title: "組態參考"
 description: "~/.openclaw/openclaw.json 的完整逐欄位參考指南"
 ---
 
-> 此文件為 [English Version](/gateway/configuration-reference) 的繁體中文版本。
+> 此文件為 [English Version](/gateway/configuration-reference_zh_TW) 的繁體中文版本。
 
 # 組態參考
 

@@ -7,7 +7,7 @@ read_when:
 title: "組態範例"
 ---
 
-> 此文件為 [English Version](/gateway/configuration-examples) 的繁體中文版本。
+> 此文件為 [English Version](/gateway/configuration-examples_zh_TW) 的繁體中文版本。
 
 # 組態範例
 

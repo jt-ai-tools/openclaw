@@ -5,7 +5,7 @@ read_when: "當您遇到「沙箱監獄」或看到工具/提升權限請求被�
 status: active
 ---
 
-> 此文件為 [English Version](/gateway/sandbox-vs-tool-policy-vs-elevated) 的繁體中文版本。
+> 此文件為 [English Version](/gateway/sandbox-vs-tool-policy-vs-elevated_zh_TW) 的繁體中文版本。
 
 # 沙箱 vs 工具原則 vs 提升權限
 

@@ -6,7 +6,7 @@ read_when:
 title: "心跳偵測"
 ---
 
-> 此文件為 [English Version](/gateway/heartbeat) 的繁體中文版本。
+> 此文件為 [English Version](/gateway/heartbeat_zh_TW) 的繁體中文版本。
 
 # 心跳偵測 (Heartbeat - 閘道器)
 

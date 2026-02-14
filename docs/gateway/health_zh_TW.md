@@ -5,7 +5,7 @@ read_when:
 title: "健康檢查"
 ---
 
-> 此文件為 [English Version](/gateway/health) 的繁體中文版本。
+> 此文件為 [English Version](/gateway/health_zh_TW) 的繁體中文版本。
 
 # 健康檢查 (CLI)
 

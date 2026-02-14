@@ -6,7 +6,7 @@ read_when:
 title: "多個閘道器"
 ---
 
-> 此文件為 [English Version](/gateway/multiple-gateways) 的繁體中文版本。
+> 此文件為 [English Version](/gateway/multiple-gateways_zh_TW) 的繁體中文版本。
 
 # 多個閘道器 (單一主機)
 
