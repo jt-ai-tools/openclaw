@@ -4,7 +4,7 @@ description: 當您需要透過 slack 工具從 OpenClaw 控制 Slack 時使用�
 metadata: { "openclaw": { "emoji": "💬", "requires": { "config": ["channels.slack"] } } }
 ---
 
-> 此文件為 [English Version](SKILL.md) 的繁體中文版本。
+> 此文件為 [English Version](SKILL_zh_TW.md) 的繁體中文版本。
 
 # Slack 動作 (Slack Actions)
 

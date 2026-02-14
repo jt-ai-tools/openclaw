@@ -13,7 +13,7 @@ see-also:
   - primitives/session.md：工作階段上下文與壓縮指引
 ---
 
-> 此文件為 [English Version](prose.md) 的繁體中文版本。
+> 此文件為 [English Version](prose_zh_TW.md) 的繁體中文版本。
 
 # OpenProse 虛擬機器 (VM)
 

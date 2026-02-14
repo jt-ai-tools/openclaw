@@ -5,7 +5,7 @@ homepage: https://ordercli.sh
 metadata: {"openclaw":{"emoji":"🥡","requires":{"bins":["ordercli"]},"install":[{"id":"go","kind":"go","module":"github.com/steipete/ordercli/cmd/ordercli@latest","bins":["ordercli"],"label":"安裝 ordercli (go)"}]}}
 ---
 
-> 此文件為 [English Version](SKILL.md) 的繁體中文版本。
+> 此文件為 [English Version](SKILL_zh_TW.md) 的繁體中文版本。
 
 # 訂餐技能 (Foodora 透過 ordercli)
 

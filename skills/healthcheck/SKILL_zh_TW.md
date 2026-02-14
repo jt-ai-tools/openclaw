@@ -3,7 +3,7 @@ name: healthcheck
 description: OpenClaw 部署的主機安全性強化與風險承受度配置。當使用者要求安全性審計、防火牆/SSH/更新強化、風險狀況評估、曝險審查、OpenClaw 定期檢查排程，或在執行 OpenClaw 的機器（筆電、工作站、Pi、VPS）上檢查版本狀態時使用。
 ---
 
-> 此文件為 [English Version](SKILL.md) 的繁體中文版本。
+> 此文件為 [English Version](SKILL_zh_TW.md) 的繁體中文版本。
 
 # OpenClaw 主機強化 (Host Hardening)
 

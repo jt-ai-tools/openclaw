@@ -4,7 +4,7 @@ description: 當需要透過 BlueBubbles（建議的 iMessage 整合方案）傳
 metadata: { "openclaw": { "emoji": "🫧", "requires": { "config": ["channels.bluebubbles"] } } }
 ---
 
-> 此文件為 [English Version](SKILL.md) 的繁體中文版本。
+> 此文件為 [English Version](SKILL_zh_TW.md) 的繁體中文版本。
 
 # BlueBubbles 動作指令
 

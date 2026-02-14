@@ -4,7 +4,7 @@ description: |
   飛書文件讀寫操作。當使用者提到飛書文件、雲端文件或 docx 連結時激活。
 ---
 
-> 此文件為 [English Version](SKILL.md) 的繁體中文版本。
+> 此文件為 [English Version](SKILL_zh_TW.md) 的繁體中文版本。
 
 # 飛書文件工具 (Feishu Document Tool)
 

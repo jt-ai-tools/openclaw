@@ -4,7 +4,7 @@ description: |
   飛書知識庫導覽。當使用者提到知識庫、維基 (Wiki) 或維基連結時激活。
 ---
 
-> 此文件為 [English Version](SKILL.md) 的繁體中文版本。
+> 此文件為 [English Version](SKILL_zh_TW.md) 的繁體中文版本。
 
 # 飛書維基工具 (Feishu Wiki Tool)
 

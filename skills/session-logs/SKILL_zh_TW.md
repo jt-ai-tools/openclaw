@@ -4,7 +4,7 @@ description: 使用 jq 搜尋並分析您自己的工作階段紀錄（舊有的
 metadata: { "openclaw": { "emoji": "📜", "requires": { "bins": ["jq", "rg"] } } }
 ---
 
-> 此文件為 [English Version](SKILL.md) 的繁體中文版本。
+> 此文件為 [English Version](SKILL_zh_TW.md) 的繁體中文版本。
 
 # 對談紀錄 (session-logs)
 

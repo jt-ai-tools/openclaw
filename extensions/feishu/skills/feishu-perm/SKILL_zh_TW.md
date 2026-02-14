@@ -4,7 +4,7 @@ description: |
   飛書文件與檔案權限管理。當使用者提到分享、權限、協作者時激活。
 ---
 
-> 此文件為 [English Version](SKILL.md) 的繁體中文版本。
+> 此文件為 [English Version](SKILL_zh_TW.md) 的繁體中文版本。
 
 # 飛書權限工具 (Feishu Permission Tool)
 

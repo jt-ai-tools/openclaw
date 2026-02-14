@@ -4,7 +4,7 @@ description: OpenProse VM 技能包。針對任何 `prose` 指令、.prose 檔�
 metadata: { "openclaw": { "emoji": "🪶", "homepage": "https://www.prose.md" } }
 ---
 
-> 此文件為 [English Version](SKILL.md) 的繁體中文版本。
+> 此文件為 [English Version](SKILL_zh_TW.md) 的繁體中文版本。
 
 # OpenProse 技能
 

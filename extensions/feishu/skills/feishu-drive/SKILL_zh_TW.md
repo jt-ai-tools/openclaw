@@ -4,7 +4,7 @@ description: |
   飛書雲端硬碟檔案管理。當使用者提到雲端空間、資料夾、硬碟時激活。
 ---
 
-> 此文件為 [English Version](SKILL.md) 的繁體中文版本。
+> 此文件為 [English Version](SKILL_zh_TW.md) 的繁體中文版本。
 
 # 飛書雲端硬碟工具 (Feishu Drive Tool)
 

@@ -4,7 +4,7 @@ description: 當您需要透過 discord 工具從 OpenClaw 控制 Discord 時使
 metadata: {"openclaw":{"emoji":"🎮","requires":{"config":["channels.discord"]}}}
 ---
 
-> 此文件為 [English Version](SKILL.md) 的繁體中文版本。
+> 此文件為 [English Version](SKILL_zh_TW.md) 的繁體中文版本。
 
 # Discord 動作 (Discord Actions)
 

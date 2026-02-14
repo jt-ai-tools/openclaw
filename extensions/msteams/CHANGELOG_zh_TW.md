@@ -1,6 +1,6 @@
 # MSTeams 變更日誌 (Changelog)
 
-> 此文件為 [English Version](CHANGELOG.md) 的繁體中文版本。
+> 此文件為 [English Version](CHANGELOG_zh_TW.md) 的繁體中文版本。
 
 ## 2026.1.15
 

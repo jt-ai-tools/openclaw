@@ -3,7 +3,7 @@ name: skill-creator
 description: 建立或更新代理人技能 (AgentSkills)。當您在設計、結構化或打包帶有腳本、參考文件與資產的技能時使用。
 ---
 
-> 此文件為 [English Version](SKILL.md) 的繁體中文版本。
+> 此文件為 [English Version](SKILL_zh_TW.md) 的繁體中文版本。
 
 # 技能建立者 (Skill Creator)
 
