@@ -1,4 +1,4 @@
-> 此文件為 [English Version](AGENTS.md) 的繁體中文版本。
+> 此文件為 [English Version](AGENTS_zh_TW.md) 的繁體中文版本。
 
 # 儲存庫指南 (Repository Guidelines)
 
@@ -23,9 +23,9 @@
 ## 文件連結 (Mintlify)
 
 - 文件託管於 Mintlify (docs.openclaw.ai)。
-- `docs/**/*.md` 中的內部文件連結：使用根目錄相對路徑，不含 `.md`/`.mdx`（例如：`[Config](/configuration)`）。
+- `docs/**/*.md` 中的內部文件連結：使用根目錄相對路徑，不含 `.md`/`.mdx`（例如：`[Config](/configuration_zh_TW)`）。
 - 處理文件時，請參閱 mintlify 技能 (skill)。
-- 章節交叉引用：在根目錄相對路徑上使用錨點（例如：`[Hooks](/configuration#hooks)`）。
+- 章節交叉引用：在根目錄相對路徑上使用錨點（例如：`[Hooks](/configuration_zh_TW#hooks)`）。
 - 文件標題與錨點：標題中避免使用長破折號 (em dashes) 和單引號，因為它們會破壞 Mintlify 的錨點連結。
 - 當 Peter 詢問連結時，請回覆完整的 `https://docs.openclaw.ai/...` URL（而非根目錄相對路徑）。
 - 當您更動文件時，請在回覆末尾附上您參考的 `https://docs.openclaw.ai/...` URL。

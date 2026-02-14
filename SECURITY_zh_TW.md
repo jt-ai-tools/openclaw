@@ -1,4 +1,4 @@
-> 此文件為 [English Version](SECURITY.md) 的繁體中文版本。
+> 此文件為 [English Version](SECURITY_zh_TW.md) 的繁體中文版本。
 
 # 安全性政策 (Security Policy)
 

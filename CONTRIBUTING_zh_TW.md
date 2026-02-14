@@ -1,4 +1,4 @@
-> 此文件為 [English Version](CONTRIBUTING.md) 的繁體中文版本。
+> 此文件為 [English Version](CONTRIBUTING_zh_TW.md) 的繁體中文版本。
 
 # 參與 OpenClaw 貢獻
 

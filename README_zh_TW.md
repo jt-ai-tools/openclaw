@@ -1,4 +1,4 @@
-> 此文件為 [English Version](README.md) 的繁體中文版本。
+> 此文件為 [English Version](README_zh_TW.md) 的繁體中文版本。
 
 # 🦞 OpenClaw — 個人 AI 助理
 

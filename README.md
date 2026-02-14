@@ -1,6 +1,10 @@
 # 🦞 OpenClaw — Personal AI Assistant
 
 <p align="center">
+  <a href="README_zh_TW.md">繁體中文版 (Traditional Chinese)</a>
+</p>
+
+<p align="center">
     <picture>
         <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/openclaw/openclaw/main/docs/assets/openclaw-logo-text-dark.png">
         <img src="https://raw.githubusercontent.com/openclaw/openclaw/main/docs/assets/openclaw-logo-text.png" alt="OpenClaw" width="500">
