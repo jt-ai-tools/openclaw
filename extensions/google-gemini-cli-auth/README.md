@@ -1,35 +1,8 @@
-# Google Gemini CLI Auth (OpenClaw plugin)
+# google-gemini-cli-auth 目錄索引
 
-OAuth provider plugin for **Gemini CLI** (Google Code Assist).
+### 文件
 
-## Enable
+| 檔案名稱 | 連結 |
+| :--- | :--- |
+| README_zh_TW.md | [README_zh_TW.md](README_zh_TW.md) |
 
-Bundled plugins are disabled by default. Enable this one:
-
-```bash
-openclaw plugins enable google-gemini-cli-auth
-```
-
-Restart the Gateway after enabling.
-
-## Authenticate
-
-```bash
-openclaw models auth login --provider google-gemini-cli --set-default
-```
-
-## Requirements
-
-Requires the Gemini CLI to be installed (credentials are extracted automatically):
-
-```bash
-brew install gemini-cli
-# or: npm install -g @google/gemini-cli
-```
-
-## Env vars (optional)
-
-Override auto-detected credentials with:
-
-- `OPENCLAW_GEMINI_OAUTH_CLIENT_ID` / `GEMINI_CLI_OAUTH_CLIENT_ID`
-- `OPENCLAW_GEMINI_OAUTH_CLIENT_SECRET` / `GEMINI_CLI_OAUTH_CLIENT_SECRET`

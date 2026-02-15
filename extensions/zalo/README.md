@@ -1,50 +1,12 @@
-# @openclaw/zalo
+# zalo 目錄索引
 
-Zalo channel plugin for OpenClaw (Bot API).
+### 文件
 
-## Install (local checkout)
+| 檔案名稱 | 連結 |
+| :--- | :--- |
+| CHANGELOG.md | [CHANGELOG.md](CHANGELOG.md) |
+| README_zh_TW.md | [README_zh_TW.md](README_zh_TW.md) |
 
-```bash
-openclaw plugins install ./extensions/zalo
-```
+### 子目錄
 
-## Install (npm)
-
-```bash
-openclaw plugins install @openclaw/zalo
-```
-
-Onboarding: select Zalo and confirm the install prompt to fetch the plugin automatically.
-
-## Config
-
-```json5
-{
-  channels: {
-    zalo: {
-      enabled: true,
-      botToken: "12345689:abc-xyz",
-      dmPolicy: "pairing",
-      proxy: "http://proxy.local:8080",
-    },
-  },
-}
-```
-
-## Webhook mode
-
-```json5
-{
-  channels: {
-    zalo: {
-      webhookUrl: "https://example.com/zalo-webhook",
-      webhookSecret: "your-secret-8-plus-chars",
-      webhookPath: "/zalo-webhook",
-    },
-  },
-}
-```
-
-If `webhookPath` is omitted, the plugin uses the webhook URL path.
-
-Restart the gateway after config changes.
+- [src](src/README.md)

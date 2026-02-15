@@ -1,17 +1,7 @@
-# OpenClaw Security & Trust
+# security 目錄索引
 
-**Live:** [trust.openclaw.ai](https://trust.openclaw.ai)
-
-## Documents
-
-- [Threat Model](./THREAT-MODEL-ATLAS.md) - MITRE ATLAS-based threat model for the OpenClaw ecosystem
-- [Contributing to the Threat Model](./CONTRIBUTING-THREAT-MODEL.md) - How to add threats, mitigations, and attack chains
-
-## Reporting Vulnerabilities
-
-See the [Trust page](https://trust.openclaw.ai) for full reporting instructions covering all repos.
-
-## Contact
-
-- **Jamieson O'Reilly** ([@theonejvo](https://twitter.com/theonejvo)) - Security & Trust
-- Discord: #security channel
+| 功能/主題 | 英文版 | 繁體中文版 | 簡體中文版 |
+| :--- | :--- | :--- | :--- |
+| CONTRIBUTING-THREAT-MODEL | [English](CONTRIBUTING-THREAT-MODEL.md) | [繁體中文](CONTRIBUTING-THREAT-MODEL_zh_TW.md) | - |
+| THREAT-MODEL-ATLAS | [English](THREAT-MODEL-ATLAS.md) | [繁體中文](THREAT-MODEL-ATLAS_zh_TW.md) | - |
+| formal-verification | [English](formal-verification.md) | [繁體中文](formal-verification_zh_TW.md) | [簡體中文](../zh-CN/security/formal-verification.md) |

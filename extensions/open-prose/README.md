@@ -1,25 +1,11 @@
-# OpenProse (plugin)
+# open-prose 目錄索引
 
-Adds the OpenProse skill pack and `/prose` slash command.
+### 文件
 
-## Enable
+| 檔案名稱 | 連結 |
+| :--- | :--- |
+| README_zh_TW.md | [README_zh_TW.md](README_zh_TW.md) |
 
-Bundled plugins are disabled by default. Enable this one:
+### 子目錄
 
-```json
-{
-  "plugins": {
-    "entries": {
-      "open-prose": { "enabled": true }
-    }
-  }
-}
-```
-
-Restart the Gateway after enabling.
-
-## What you get
-
-- `/prose` slash command (user-invocable skill)
-- OpenProse VM semantics (`.prose` programs + multi-agent orchestration)
-- Telemetry support (best-effort, per OpenProse spec)
+- [skills](skills/README.md)

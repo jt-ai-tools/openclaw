@@ -1,24 +1,8 @@
-# Qwen OAuth (OpenClaw plugin)
+# qwen-portal-auth 目錄索引
 
-OAuth provider plugin for **Qwen** (free-tier OAuth).
+### 文件
 
-## Enable
+| 檔案名稱 | 連結 |
+| :--- | :--- |
+| README_zh_TW.md | [README_zh_TW.md](README_zh_TW.md) |
 
-Bundled plugins are disabled by default. Enable this one:
-
-```bash
-openclaw plugins enable qwen-portal-auth
-```
-
-Restart the Gateway after enabling.
-
-## Authenticate
-
-```bash
-openclaw models auth login --provider qwen-portal --set-default
-```
-
-## Notes
-
-- Qwen OAuth uses a device-code login flow.
-- Tokens auto-refresh; re-run login if refresh fails or access is revoked.

@@ -131,6 +131,20 @@ Telegram/WhatsApp/Signal/iMessage/Microsoft Teams/Discord/Google Chat/Slack 的�
 - **[配套應用程式](docs/platforms/macos_zh_TW.md)** — macOS 選單列應用程式 + iOS/Android [節點 (nodes)](docs/nodes/index_zh_TW.md)。
 - **[引導設定](docs/start/wizard_zh_TW.md) + [技能](docs/tools/skills_zh_TW.md)** — 由精靈驅動的設定，包含內建/託管/工作區技能。
 
+## 專案目錄索引
+
+為了方便導覽，每個子目錄現在都包含一個繁體中文的 `README.md` 索引文件：
+
+- [文件 (Docs)](docs/README.md) — 完整的產品文件。
+- [擴充功能 (Extensions)](extensions/README.md) — 支援各種頻道的插件。
+- [原始碼 (Source)](src/README.md) — 核心邏輯與閘道器實作。
+- [套件 (Packages)](packages/README.md) — 內部使用的套件。
+- [腳本 (Scripts)](scripts/README.md) — 開發與部署工具。
+- [應用程式 (Apps)](apps/README.md) — macOS, iOS, Android 應用程式。
+- [使用者介面 (UI)](ui/README.md) — 網頁儀表板原始碼。
+- [測試 (Test)](test/README.md) — 測試套件與模擬資料。
+- [資產 (Assets)](assets/README.md) — 靜態資源與圖示。
+
 ## 星星歷史 (Star History)
 
 [![Star History Chart](https://api.star-history.com/svg?repos=openclaw/openclaw&type=date&legend=top-left)](https://www.star-history.com/#openclaw/openclaw&type=date&legend=top-left)

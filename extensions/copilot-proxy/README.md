@@ -1,24 +1,8 @@
-# Copilot Proxy (OpenClaw plugin)
+# copilot-proxy 目錄索引
 
-Provider plugin for the **Copilot Proxy** VS Code extension.
+### 文件
 
-## Enable
+| 檔案名稱 | 連結 |
+| :--- | :--- |
+| README_zh_TW.md | [README_zh_TW.md](README_zh_TW.md) |
 
-Bundled plugins are disabled by default. Enable this one:
-
-```bash
-openclaw plugins enable copilot-proxy
-```
-
-Restart the Gateway after enabling.
-
-## Authenticate
-
-```bash
-openclaw models auth login --provider copilot-proxy --set-default
-```
-
-## Notes
-
-- Copilot Proxy must be running in VS Code.
-- Base URL must include `/v1`.

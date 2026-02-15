@@ -1,24 +1,8 @@
-# Google Antigravity Auth (OpenClaw plugin)
+# google-antigravity-auth 目錄索引
 
-OAuth provider plugin for **Google Antigravity** (Cloud Code Assist).
+### 文件
 
-## Enable
+| 檔案名稱 | 連結 |
+| :--- | :--- |
+| README_zh_TW.md | [README_zh_TW.md](README_zh_TW.md) |
 
-Bundled plugins are disabled by default. Enable this one:
-
-```bash
-openclaw plugins enable google-antigravity-auth
-```
-
-Restart the Gateway after enabling.
-
-## Authenticate
-
-```bash
-openclaw models auth login --provider google-antigravity --set-default
-```
-
-## Notes
-
-- Antigravity uses Google Cloud project quotas.
-- If requests fail, ensure Gemini for Google Cloud is enabled.
