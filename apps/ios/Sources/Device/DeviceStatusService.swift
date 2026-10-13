@@ -2,6 +2,7 @@ import Foundation
 import OpenClawKit
 import UIKit
 
+@MainActor
 final class DeviceStatusService: DeviceStatusServicing {
     private let networkStatus: NetworkStatusService
 
@@ -10,10 +11,10 @@ final class DeviceStatusService: DeviceStatusServicing {
     }
 
     func status() async throws -> OpenClawDeviceStatusPayload {
-        let battery = self.batteryStatus()
+        let battery = Self.batteryStatus(device: UIDevice.current)
         let thermal = self.thermalStatus()
         let storage = self.storageStatus()
-        let network = await self.networkStatus.currentStatus()
+        let network = try await self.networkStatus.currentStatus()
         let uptime = ProcessInfo.processInfo.systemUptime
 
         return OpenClawDeviceStatusPayload(
@@ -26,23 +27,28 @@ final class DeviceStatusService: DeviceStatusServicing {
 
     func info() -> OpenClawDeviceInfoPayload {
         let device = UIDevice.current
-        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
-        let appBuild = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
+        let appVersion = DeviceInfoHelper.appVersion()
+        let appBuild = DeviceInfoHelper.appBuild()
         let locale = Locale.preferredLanguages.first ?? Locale.current.identifier
         return OpenClawDeviceInfoPayload(
             deviceName: device.name,
-            modelIdentifier: Self.modelIdentifier(),
+            modelIdentifier: DeviceInfoHelper.modelIdentifier(),
             systemName: device.systemName,
             systemVersion: device.systemVersion,
             appVersion: appVersion,
-            appBuild: appBuild,
+            appBuild: appBuild.isEmpty ? "0" : appBuild,
             locale: locale)
     }
 
-    private func batteryStatus() -> OpenClawBatteryStatusPayload {
-        let device = UIDevice.current
+    static func batteryStatus(device: UIDevice) -> OpenClawBatteryStatusPayload {
+        let wasMonitoring = device.isBatteryMonitoringEnabled
         device.isBatteryMonitoringEnabled = true
+        defer { device.isBatteryMonitoringEnabled = wasMonitoring }
+        // UIDevice.batteryLevel is a normalized 0.0–1.0 fraction, matching the
+        // shared OpenClawBatteryStatusPayload.level contract. `levelPercent`
+        // mirrors it as an integer 0–100 percentage.
         let level = device.batteryLevel >= 0 ? Double(device.batteryLevel) : nil
+        let levelPercent = level.map { Int(($0 * 100).rounded()) }
         let state: OpenClawBatteryState = switch device.batteryState {
         case .charging: .charging
         case .full: .full
@@ -53,7 +59,8 @@ final class DeviceStatusService: DeviceStatusServicing {
         return OpenClawBatteryStatusPayload(
             level: level,
             state: state,
-            lowPowerModeEnabled: ProcessInfo.processInfo.isLowPowerModeEnabled)
+            lowPowerModeEnabled: ProcessInfo.processInfo.isLowPowerModeEnabled,
+            levelPercent: levelPercent)
     }
 
     private func thermalStatus() -> OpenClawThermalStatusPayload {
@@ -73,15 +80,5 @@ final class DeviceStatusService: DeviceStatusServicing {
         let free = (attrs[.systemFreeSize] as? NSNumber)?.int64Value ?? 0
         let used = max(0, total - free)
         return OpenClawStorageStatusPayload(totalBytes: total, freeBytes: free, usedBytes: used)
-    }
-
-    private static func modelIdentifier() -> String {
-        var systemInfo = utsname()
-        uname(&systemInfo)
-        let machine = withUnsafeBytes(of: &systemInfo.machine) { ptr in
-            String(bytes: ptr.prefix { $0 != 0 }, encoding: .utf8)
-        }
-        let trimmed = machine?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return trimmed.isEmpty ? "unknown" : trimmed
     }
 }

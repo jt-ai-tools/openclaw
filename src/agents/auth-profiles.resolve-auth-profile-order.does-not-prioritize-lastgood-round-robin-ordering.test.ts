@@ -1,234 +1,148 @@
-import { describe, expect, it } from "vitest";
-import { resolveAuthProfileOrder } from "./auth-profiles.js";
+import { describe, expect, it, vi } from "vitest";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { resolveAuthProfileOrder } from "./auth-profiles/order.js";
+import type { AuthProfileCredential, AuthProfileStore } from "./auth-profiles/types.js";
+
+vi.mock("./provider-auth-aliases.js", () => ({
+  resolveProviderIdForAuth: (provider: string) => provider.trim().toLowerCase(),
+}));
+
+const apiKey = (provider = "anthropic"): AuthProfileCredential => ({
+  type: "api_key",
+  provider,
+  key: "synthetic-key",
+});
+const oauth = (): AuthProfileCredential => ({
+  type: "oauth",
+  provider: "anthropic",
+  access: "",
+  refresh: "refresh-token",
+  expires: 1,
+});
+const makeStore = (profiles: AuthProfileStore["profiles"]): AuthProfileStore => ({
+  version: 1,
+  profiles,
+});
 
 describe("resolveAuthProfileOrder", () => {
-  const store: AuthProfileStore = {
-    version: 1,
-    profiles: {
-      "anthropic:default": {
-        type: "api_key",
-        provider: "anthropic",
-        key: "sk-default",
+  it("accepts a config-only AWS profile with AWS SDK provider auth", () => {
+    const cfg: OpenClawConfig = {
+      models: {
+        providers: { bedrock: { auth: "aws-sdk", baseUrl: "https://example.test", models: [] } },
       },
-      "anthropic:work": {
-        type: "api_key",
-        provider: "anthropic",
-        key: "sk-work",
+      auth: {
+        profiles: { aws: { provider: "bedrock", mode: "aws-sdk" } },
+        order: { bedrock: ["aws"] },
       },
-    },
-  };
-  const cfg = {
-    auth: {
-      profiles: {
-        "anthropic:default": { provider: "anthropic", mode: "api_key" },
-        "anthropic:work": { provider: "anthropic", mode: "api_key" },
-      },
-    },
-  };
-
-  it("does not prioritize lastGood over round-robin ordering", () => {
-    const order = resolveAuthProfileOrder({
-      cfg,
-      store: {
-        ...store,
-        lastGood: { anthropic: "anthropic:work" },
-        usageStats: {
-          "anthropic:default": { lastUsed: 100 },
-          "anthropic:work": { lastUsed: 200 },
-        },
-      },
-      provider: "anthropic",
-    });
-    expect(order[0]).toBe("anthropic:default");
-  });
-  it("uses explicit profiles when order is missing", () => {
-    const order = resolveAuthProfileOrder({
-      cfg,
-      store,
-      provider: "anthropic",
-    });
-    expect(order).toEqual(["anthropic:default", "anthropic:work"]);
-  });
-  it("uses configured order when provided", () => {
-    const order = resolveAuthProfileOrder({
-      cfg: {
-        auth: {
-          order: { anthropic: ["anthropic:work", "anthropic:default"] },
-          profiles: cfg.auth.profiles,
-        },
-      },
-      store,
-      provider: "anthropic",
-    });
-    expect(order).toEqual(["anthropic:work", "anthropic:default"]);
-  });
-  it("prefers store order over config order", () => {
-    const order = resolveAuthProfileOrder({
-      cfg: {
-        auth: {
-          order: { anthropic: ["anthropic:default", "anthropic:work"] },
-          profiles: cfg.auth.profiles,
-        },
-      },
-      store: {
-        ...store,
-        order: { anthropic: ["anthropic:work", "anthropic:default"] },
-      },
-      provider: "anthropic",
-    });
-    expect(order).toEqual(["anthropic:work", "anthropic:default"]);
-  });
-  it("pushes cooldown profiles to the end even with store order", () => {
-    const now = Date.now();
-    const order = resolveAuthProfileOrder({
-      store: {
-        ...store,
-        order: { anthropic: ["anthropic:default", "anthropic:work"] },
-        usageStats: {
-          "anthropic:default": { cooldownUntil: now + 60_000 },
-          "anthropic:work": { lastUsed: 1 },
-        },
-      },
-      provider: "anthropic",
-    });
-    expect(order).toEqual(["anthropic:work", "anthropic:default"]);
-  });
-  it("pushes cooldown profiles to the end even with configured order", () => {
-    const now = Date.now();
-    const order = resolveAuthProfileOrder({
-      cfg: {
-        auth: {
-          order: { anthropic: ["anthropic:default", "anthropic:work"] },
-          profiles: cfg.auth.profiles,
-        },
-      },
-      store: {
-        ...store,
-        usageStats: {
-          "anthropic:default": { cooldownUntil: now + 60_000 },
-          "anthropic:work": { lastUsed: 1 },
-        },
-      },
-      provider: "anthropic",
-    });
-    expect(order).toEqual(["anthropic:work", "anthropic:default"]);
-  });
-  it("pushes disabled profiles to the end even with store order", () => {
-    const now = Date.now();
-    const order = resolveAuthProfileOrder({
-      store: {
-        ...store,
-        order: { anthropic: ["anthropic:default", "anthropic:work"] },
-        usageStats: {
-          "anthropic:default": {
-            disabledUntil: now + 60_000,
-            disabledReason: "billing",
-          },
-          "anthropic:work": { lastUsed: 1 },
-        },
-      },
-      provider: "anthropic",
-    });
-    expect(order).toEqual(["anthropic:work", "anthropic:default"]);
-  });
-  it("pushes disabled profiles to the end even with configured order", () => {
-    const now = Date.now();
-    const order = resolveAuthProfileOrder({
-      cfg: {
-        auth: {
-          order: { anthropic: ["anthropic:default", "anthropic:work"] },
-          profiles: cfg.auth.profiles,
-        },
-      },
-      store: {
-        ...store,
-        usageStats: {
-          "anthropic:default": {
-            disabledUntil: now + 60_000,
-            disabledReason: "billing",
-          },
-          "anthropic:work": { lastUsed: 1 },
-        },
-      },
-      provider: "anthropic",
-    });
-    expect(order).toEqual(["anthropic:work", "anthropic:default"]);
+    };
+    expect(resolveAuthProfileOrder({ cfg, store: makeStore({}), provider: "bedrock" })).toEqual([
+      "aws",
+    ]);
   });
 
-  it("mode: oauth config accepts both oauth and token credentials (issue #559)", () => {
-    const now = Date.now();
-    const storeWithBothTypes: AuthProfileStore = {
-      version: 1,
-      profiles: {
-        "anthropic:oauth-cred": {
-          type: "oauth",
-          provider: "anthropic",
-          access: "access-token",
-          refresh: "refresh-token",
-          expires: now + 60_000,
-        },
-        "anthropic:token-cred": {
-          type: "token",
-          provider: "anthropic",
-          token: "just-a-token",
-          expires: now + 60_000,
+  it("ranks credential modes, then lastUsed, without prioritizing lastGood", () => {
+    const store = makeStore({
+      recent: apiKey(),
+      oauth: oauth(),
+      oldest: apiKey(),
+      token: { type: "token", provider: "anthropic", token: "token" },
+    });
+    store.lastGood = { anthropic: "recent" };
+    store.usageStats = { recent: { lastUsed: 200 }, oldest: { lastUsed: 100 } };
+    expect(resolveAuthProfileOrder({ store, provider: "anthropic" })).toEqual([
+      "oauth",
+      "token",
+      "oldest",
+      "recent",
+    ]);
+  });
+
+  it("filters explicit selection by provider, mode, secret availability, and expiry", () => {
+    const store = makeStore({
+      keyRef: {
+        type: "api_key",
+        provider: "anthropic",
+        keyRef: { source: "exec", provider: "vault", id: "anthropic/default" },
+      },
+      tokenRef: {
+        type: "token",
+        provider: "anthropic",
+        tokenRef: { source: "exec", provider: "vault", id: "anthropic/token" },
+      },
+      refreshable: oauth(),
+      wrongProvider: apiKey("openai"),
+      wrongConfigProvider: apiKey(),
+      wrongMode: oauth(),
+      empty: { type: "token", provider: "anthropic", token: " " },
+      expired: { type: "token", provider: "anthropic", token: "token", expires: 1 },
+      invalid: { type: "token", provider: "anthropic", token: "token", expires: 0 },
+    });
+    const cfg: OpenClawConfig = {
+      auth: {
+        order: { Anthropic: ["missing", ...Object.keys(store.profiles)] },
+        profiles: {
+          tokenRef: { provider: "anthropic", mode: "oauth" },
+          refreshable: { provider: "anthropic", mode: "oauth" },
+          wrongMode: { provider: "anthropic", mode: "token" },
+          wrongConfigProvider: { provider: "openai", mode: "api_key" },
         },
       },
     };
-
-    const orderOauthCred = resolveAuthProfileOrder({
-      store: storeWithBothTypes,
-      provider: "anthropic",
-      cfg: {
-        auth: {
-          profiles: {
-            "anthropic:oauth-cred": { provider: "anthropic", mode: "oauth" },
-          },
-        },
-      },
-    });
-    expect(orderOauthCred).toContain("anthropic:oauth-cred");
-
-    const orderTokenCred = resolveAuthProfileOrder({
-      store: storeWithBothTypes,
-      provider: "anthropic",
-      cfg: {
-        auth: {
-          profiles: {
-            "anthropic:token-cred": { provider: "anthropic", mode: "oauth" },
-          },
-        },
-      },
-    });
-    expect(orderTokenCred).toContain("anthropic:token-cred");
+    expect(resolveAuthProfileOrder({ cfg, store, provider: "anthropic" })).toEqual([
+      "keyRef",
+      "tokenRef",
+      "refreshable",
+    ]);
   });
 
-  it("mode: token config rejects oauth credentials (issue #559 root cause)", () => {
-    const now = Date.now();
-    const storeWithOauth: AuthProfileStore = {
-      version: 1,
-      profiles: {
-        "anthropic:oauth-cred": {
-          type: "oauth",
-          provider: "anthropic",
-          access: "access-token",
-          refresh: "refresh-token",
-          expires: now + 60_000,
-        },
+  it("promotes a preferred profile without dropping its fallback", () => {
+    const store = makeStore({ first: apiKey(), second: apiKey() });
+    expect(
+      resolveAuthProfileOrder({ store, provider: "anthropic", preferredProfile: "second" }),
+    ).toEqual(["second", "first"]);
+  });
+
+  it("repairs configured profile-id drift using stored credentials", () => {
+    const cfg: OpenClawConfig = {
+      auth: {
+        profiles: { old: { provider: "anthropic", mode: "oauth" } },
+        order: { anthropic: ["old"] },
       },
     };
+    expect(
+      resolveAuthProfileOrder({
+        cfg,
+        store: makeStore({ current: oauth() }),
+        provider: "anthropic",
+      }),
+    ).toEqual(["current"]);
+  });
 
-    const order = resolveAuthProfileOrder({
-      store: storeWithOauth,
-      provider: "anthropic",
-      cfg: {
-        auth: {
-          profiles: {
-            "anthropic:oauth-cred": { provider: "anthropic", mode: "token" },
-          },
-        },
-      },
+  it("clears expired cooldowns and orders active windows after available profiles", () => {
+    const now = Date.now();
+    const store = makeStore({
+      expired: apiKey(),
+      late: oauth(),
+      early: apiKey(),
+      other: apiKey("openai"),
     });
-    expect(order).not.toContain("anthropic:oauth-cred");
+    store.usageStats = {
+      expired: { cooldownUntil: now - 1000, errorCount: 4, failureCounts: { rate_limit: 4 } },
+      late: { cooldownUntil: now + 120_000, errorCount: 2 },
+      early: { disabledUntil: now + 60_000, disabledReason: "billing" },
+      other: { cooldownUntil: now - 1000, errorCount: 3 },
+    };
+    expect(resolveAuthProfileOrder({ store, provider: "anthropic" })).toEqual([
+      "expired",
+      "early",
+      "late",
+    ]);
+    expect(store.usageStats.expired).toMatchObject({
+      errorCount: 0,
+      failureCounts: { rate_limit: 4 },
+    });
+    expect(store.usageStats.expired?.cooldownUntil).toBeUndefined();
+    expect(store.usageStats.other?.errorCount).toBe(0);
+    expect(store.usageStats.late).toMatchObject({ cooldownUntil: now + 120_000, errorCount: 2 });
   });
 });

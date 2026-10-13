@@ -1,13 +1,9 @@
 import Foundation
+import OpenClawKit
 
-enum MacNodeScreenCommand: String, Codable, Sendable {
-    case record = "screen.record"
-}
-
-struct MacNodeScreenRecordParams: Codable, Sendable, Equatable {
+struct MacNodeScreenSnapshotParams: Codable, Equatable {
     var screenIndex: Int?
-    var durationMs: Int?
-    var fps: Double?
-    var format: String?
-    var includeAudio: Bool?
+    var maxWidth: Int?
+    var quality: Double?
+    var format: OpenClawScreenSnapshotFormat?
 }

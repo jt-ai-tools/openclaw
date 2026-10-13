@@ -1,5 +1,11 @@
-# line 目錄索引
+# OpenClaw LINE
 
-### 子目錄
+Official OpenClaw channel plugin for LINE Bot API chats.
 
-- [src](src/README.md)
+Install from OpenClaw:
+
+```bash
+openclaw plugins install @openclaw/line
+```
+
+Configure LINE channel credentials in OpenClaw, then connect the bot to the chats where agents should receive and send messages.

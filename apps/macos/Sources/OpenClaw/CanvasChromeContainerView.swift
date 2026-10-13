@@ -39,7 +39,9 @@ final class HoverChromeContainerView: NSView {
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -60,14 +62,18 @@ final class HoverChromeContainerView: NSView {
             self.window?.performDrag(with: event)
         }
 
-        override func acceptsFirstMouse(for _: NSEvent?) -> Bool { true }
+        override func acceptsFirstMouse(for _: NSEvent?) -> Bool {
+            true
+        }
     }
 
     private final class CanvasResizeHandleView: NSView {
         private var startPoint: NSPoint = .zero
         private var startFrame: NSRect = .zero
 
-        override func acceptsFirstMouse(for _: NSEvent?) -> Bool { true }
+        override func acceptsFirstMouse(for _: NSEvent?) -> Bool {
+            true
+        }
 
         override func mouseDown(with event: NSEvent) {
             guard let window else { return }
@@ -102,7 +108,9 @@ final class HoverChromeContainerView: NSView {
         private let resizeHandle = CanvasResizeHandleView(frame: .zero)
 
         private final class PassthroughVisualEffectView: NSVisualEffectView {
-            override func hitTest(_: NSPoint) -> NSView? { nil }
+            override func hitTest(_: NSPoint) -> NSView? {
+                nil
+            }
         }
 
         private let closeBackground: NSVisualEffectView = {
@@ -148,15 +156,12 @@ final class HoverChromeContainerView: NSView {
             self.layer?.borderColor = NSColor.black.withAlphaComponent(0.18).cgColor
             self.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.02).cgColor
 
-            self.dragHandle.translatesAutoresizingMaskIntoConstraints = false
-            self.dragHandle.wantsLayer = true
-            self.dragHandle.layer?.backgroundColor = NSColor.clear.cgColor
-            self.addSubview(self.dragHandle)
-
-            self.resizeHandle.translatesAutoresizingMaskIntoConstraints = false
-            self.resizeHandle.wantsLayer = true
-            self.resizeHandle.layer?.backgroundColor = NSColor.clear.cgColor
-            self.addSubview(self.resizeHandle)
+            for handle in [self.dragHandle, self.resizeHandle] {
+                handle.translatesAutoresizingMaskIntoConstraints = false
+                handle.wantsLayer = true
+                handle.layer?.backgroundColor = NSColor.clear.cgColor
+                self.addSubview(handle)
+            }
 
             self.closeBackground.translatesAutoresizingMaskIntoConstraints = false
             self.addSubview(self.closeBackground)
@@ -190,7 +195,9 @@ final class HoverChromeContainerView: NSView {
         }
 
         @available(*, unavailable)
-        required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) is not supported")
+        }
 
         override func hitTest(_ point: NSPoint) -> NSView? {
             // When the chrome is hidden, do not intercept any mouse events (let the WKWebView receive them).

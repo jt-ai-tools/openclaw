@@ -1,92 +1,223 @@
+/**
+ * Regression coverage for token usage normalization.
+ * Verifies provider usage aliases, OpenAI-compatible output, and prompt-token derivation.
+ */
 import { describe, expect, it } from "vitest";
-import { deriveSessionTotalTokens, hasNonzeroUsage, normalizeUsage } from "./usage.js";
+import {
+  deriveContextPromptTokens,
+  derivePromptTokens,
+  deriveSessionTotalTokens,
+  normalizeUsage,
+  toOpenAiChatCompletionsUsage,
+} from "./usage.js";
 
 describe("normalizeUsage", () => {
-  it("normalizes Anthropic-style snake_case usage", () => {
-    const usage = normalizeUsage({
-      input_tokens: 1200,
-      output_tokens: 340,
-      cache_creation_input_tokens: 200,
-      cache_read_input_tokens: 50,
-      total_tokens: 1790,
+  it("preserves only complete context snapshots", () => {
+    expect(
+      normalizeUsage({
+        input: 12,
+        contextUsage: { state: "available", promptTokens: 148_874, totalTokens: 163_978 },
+      }),
+    ).toMatchObject({
+      input: 12,
+      contextUsage: { state: "available", promptTokens: 148_874, totalTokens: 163_978 },
     });
-    expect(usage).toEqual({
-      input: 1200,
-      output: 340,
-      cacheRead: 50,
-      cacheWrite: 200,
-      total: 1790,
-    });
-  });
-
-  it("normalizes OpenAI-style prompt/completion usage", () => {
-    const usage = normalizeUsage({
-      prompt_tokens: 987,
-      completion_tokens: 123,
-      total_tokens: 1110,
-    });
-    expect(usage).toEqual({
-      input: 987,
-      output: 123,
+    expect(
+      normalizeUsage({
+        input: 12,
+        contextUsage: { state: "available", promptTokens: 163_978, totalTokens: 148_874 },
+      }),
+    ).toEqual({
+      input: 12,
+      output: undefined,
       cacheRead: undefined,
       cacheWrite: undefined,
-      total: 1110,
+      total: undefined,
     });
   });
 
-  it("returns undefined for empty usage objects", () => {
-    expect(normalizeUsage({})).toBeUndefined();
+  it("handles OpenAI Responses input_tokens_details.cached_tokens field", () => {
+    const usage = normalizeUsage({
+      input_tokens: 120,
+      output_tokens: 30,
+      total_tokens: 250,
+      input_tokens_details: { cached_tokens: 100 },
+      output_tokens_details: { reasoning_tokens: 17 },
+    });
+    expect(usage).toEqual({
+      input: 20,
+      output: 30,
+      cacheRead: 100,
+      cacheWrite: undefined,
+      reasoningTokens: 17,
+      total: 250,
+    });
   });
 
-  it("guards against empty/zero usage overwrites", () => {
-    expect(hasNonzeroUsage(undefined)).toBe(false);
-    expect(hasNonzeroUsage(null)).toBe(false);
-    expect(hasNonzeroUsage({})).toBe(false);
-    expect(hasNonzeroUsage({ input: 0, output: 0 })).toBe(false);
-    expect(hasNonzeroUsage({ input: 1 })).toBe(true);
-    expect(hasNonzeroUsage({ total: 1 })).toBe(true);
+  it.each([{ provider: "Anthropic zero", details: { thinking_tokens: 0 }, expected: 0 }])(
+    "normalizes $provider output reasoning token details",
+    ({ details, expected }) => {
+      expect(
+        normalizeUsage({
+          input_tokens: 30,
+          output_tokens: 40,
+          output_tokens_details: details,
+        }),
+      ).toMatchObject({ input: 30, output: 40, reasoningTokens: expected });
+    },
+  );
+
+  it("clamps negative input to zero (pre-subtracted cached_tokens > prompt_tokens)", () => {
+    // shared model runtime OpenAI-format providers subtract cached_tokens from prompt_tokens
+    // upstream.  When cached_tokens exceeds prompt_tokens the result is negative.
+    const usage = normalizeUsage({
+      input: -4900,
+      output: 200,
+      cacheRead: 5000,
+    });
+    expect(usage).toEqual({
+      input: 0,
+      output: 200,
+      cacheRead: 5000,
+      cacheWrite: undefined,
+      total: undefined,
+    });
   });
 
-  it("caps derived session total tokens to the context window", () => {
+  it("returns undefined when no valid fields are provided", () => {
+    const usage = normalizeUsage(null);
+    expect(usage).toBeUndefined();
+  });
+});
+
+describe("toOpenAiChatCompletionsUsage", () => {
+  it("preserves reasoning token details", () => {
+    const usage = normalizeUsage({
+      prompt_tokens: 10,
+      completion_tokens: 8,
+      completion_tokens_details: { reasoning_tokens: 6 },
+      total_tokens: 18,
+    });
+    expect(toOpenAiChatCompletionsUsage(usage)).toEqual({
+      prompt_tokens: 10,
+      completion_tokens: 8,
+      completion_tokens_details: { reasoning_tokens: 6 },
+      total_tokens: 18,
+    });
+  });
+
+  it("returns zeros for undefined usage", () => {
+    expect(toOpenAiChatCompletionsUsage(undefined)).toEqual({
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0,
+    });
+  });
+
+  it("forwards cached_tokens via prompt_tokens_details when cache was hit", () => {
+    expect(
+      toOpenAiChatCompletionsUsage({
+        input: 594,
+        output: 79,
+        cacheRead: 30848,
+        cacheWrite: 0,
+        total: 31521,
+      }),
+    ).toEqual({
+      prompt_tokens: 31442,
+      completion_tokens: 79,
+      total_tokens: 31521,
+      prompt_tokens_details: { cached_tokens: 30848 },
+    });
+  });
+});
+
+describe("derivePromptTokens", () => {
+  it("returns undefined for empty usage", () => {
+    const promptTokens = derivePromptTokens({});
+    expect(promptTokens).toBeUndefined();
+  });
+});
+
+describe("deriveContextPromptTokens", () => {
+  it("does not treat total-only usage as a prompt snapshot", () => {
+    expect(
+      deriveContextPromptTokens({
+        lastCallUsage: { input: 1_000, total: 1_200 },
+      }),
+    ).toBe(1_000);
+    expect(
+      deriveContextPromptTokens({
+        lastCallUsage: { total: 1_200 },
+      }),
+    ).toBeUndefined();
+    expect(
+      deriveContextPromptTokens({
+        lastCallUsage: { output: 200, total: 1_200 },
+      }),
+    ).toBe(1_000);
+  });
+});
+
+describe("deriveSessionTotalTokens", () => {
+  it("prefers last-call usage over aggregate billing usage", () => {
+    expect(
+      deriveSessionTotalTokens({
+        lastCallUsage: { input: 38_333, output: 66, cacheRead: 120_320, total: 158_719 },
+        usage: {
+          input: 497_720,
+          output: 7_485,
+          cacheRead: 1_323_520,
+          total: 1_828_725,
+        },
+      }),
+    ).toBe(158_653);
+  });
+
+  it("prefers the explicit context snapshot over aggregate billing buckets", () => {
     expect(
       deriveSessionTotalTokens({
         usage: {
-          input: 27,
-          cacheRead: 2_400_000,
-          cacheWrite: 0,
-          total: 2_402_300,
+          input: 12,
+          output: 15_104,
+          cacheRead: 819_661,
+          cacheWrite: 93_130,
+          contextUsage: {
+            state: "available",
+            promptTokens: 148_874,
+            totalTokens: 163_978,
+          },
+          total: 927_907,
         },
-        contextTokens: 200_000,
       }),
-    ).toBe(200_000);
+    ).toBe(148_874);
   });
 
-  it("uses prompt tokens when within context window", () => {
+  it("does not store aggregate billing as session context when the snapshot is unavailable", () => {
     expect(
       deriveSessionTotalTokens({
         usage: {
-          input: 1_200,
-          cacheRead: 300,
-          cacheWrite: 50,
-          total: 2_000,
+          input: 12,
+          output: 15_104,
+          cacheRead: 819_661,
+          cacheWrite: 93_130,
+          contextUsage: { state: "unavailable" },
+          total: 927_907,
         },
-        contextTokens: 200_000,
       }),
-    ).toBe(1_550);
+    ).toBeUndefined();
   });
 
-  it("prefers explicit prompt token overrides", () => {
-    expect(
-      deriveSessionTotalTokens({
-        usage: {
-          input: 1_200,
-          cacheRead: 300,
-          cacheWrite: 50,
-          total: 9_999,
-        },
-        promptTokens: 65_000,
-        contextTokens: 200_000,
-      }),
-    ).toBe(65_000);
+  it("prefers promptTokens override over derived total", () => {
+    const totalTokens = deriveSessionTotalTokens({
+      usage: {
+        input: 1000,
+        cacheRead: 500,
+        cacheWrite: 200,
+      },
+      contextTokens: 4000,
+      promptTokens: 2500, // Override
+    });
+    expect(totalTokens).toBe(2500);
   });
 });

@@ -1,47 +1,32 @@
-import type { InlineDirectives } from "./directive-handling.js";
+import { type InlineDirectives, parseInlineSessionDirectives } from "./directive-handling.parse.js";
+
+const EMPTY_DIRECTIVES = { ...parseInlineSessionDirectives(""), command: undefined };
+
+const CLEARED_EXEC_FIELDS = {
+  hasExecDirective: false,
+  execHost: undefined,
+  execSecurity: undefined,
+  execAsk: undefined,
+  execNode: undefined,
+  rawExecHost: undefined,
+  rawExecSecurity: undefined,
+  rawExecAsk: undefined,
+  rawExecNode: undefined,
+  hasExecOptions: false,
+  invalidExecHost: false,
+  invalidExecSecurity: false,
+  invalidExecAsk: false,
+  invalidExecNode: false,
+} satisfies Partial<InlineDirectives>;
 
 export function clearInlineDirectives(cleaned: string): InlineDirectives {
+  return { ...EMPTY_DIRECTIVES, cleaned };
+}
+
+/** Clears only exec-related directive state after execution policy is consumed. */
+export function clearExecInlineDirectives(directives: InlineDirectives): InlineDirectives {
   return {
-    cleaned,
-    hasThinkDirective: false,
-    thinkLevel: undefined,
-    rawThinkLevel: undefined,
-    hasVerboseDirective: false,
-    verboseLevel: undefined,
-    rawVerboseLevel: undefined,
-    hasReasoningDirective: false,
-    reasoningLevel: undefined,
-    rawReasoningLevel: undefined,
-    hasElevatedDirective: false,
-    elevatedLevel: undefined,
-    rawElevatedLevel: undefined,
-    hasExecDirective: false,
-    execHost: undefined,
-    execSecurity: undefined,
-    execAsk: undefined,
-    execNode: undefined,
-    rawExecHost: undefined,
-    rawExecSecurity: undefined,
-    rawExecAsk: undefined,
-    rawExecNode: undefined,
-    hasExecOptions: false,
-    invalidExecHost: false,
-    invalidExecSecurity: false,
-    invalidExecAsk: false,
-    invalidExecNode: false,
-    hasStatusDirective: false,
-    hasModelDirective: false,
-    rawModelDirective: undefined,
-    hasQueueDirective: false,
-    queueMode: undefined,
-    queueReset: false,
-    rawQueueMode: undefined,
-    debounceMs: undefined,
-    cap: undefined,
-    dropPolicy: undefined,
-    rawDebounce: undefined,
-    rawCap: undefined,
-    rawDrop: undefined,
-    hasQueueOptions: false,
+    ...directives,
+    ...CLEARED_EXEC_FIELDS,
   };
 }

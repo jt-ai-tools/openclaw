@@ -4,59 +4,41 @@ import SwiftUI
 
 extension VoiceWakeOverlayController {
     func present() {
-        if !self.enableUI || ProcessInfo.processInfo.isRunningTests {
-            if !self.model.isVisible {
-                self.model.isVisible = true
-            }
-            return
-        }
+        let isFirst = !self.model.isVisible
+        if isFirst { self.model.isVisible = true }
+        self.presentation.present(self, isFirst)
+    }
+
+    func presentWindow(isFirst: Bool) {
+        if !self.enableUI || ProcessInfo.processInfo.isRunningTests { return }
         self.ensureWindow()
         self.hostingView?.rootView = VoiceWakeOverlayView(controller: self)
         let target = self.targetFrame()
-
-        guard let window else { return }
-        if !self.model.isVisible {
-            self.model.isVisible = true
-            self.logger.log(
-                level: .info,
-                "overlay present windowShown textLen=\(self.model.text.count, privacy: .public)")
-            // Keep the status item in “listening” mode until we explicitly dismiss the overlay.
-            AppStateStore.shared.triggerVoiceEars(ttl: nil)
-            let start = target.offsetBy(dx: 0, dy: -6)
-            window.setFrame(start, display: true)
-            window.alphaValue = 0
-            window.orderFrontRegardless()
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.18
-                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                window.animator().setFrame(target, display: true)
-                window.animator().alphaValue = 1
-            }
-        } else {
-            self.updateWindowFrame(animate: true)
-            window.orderFrontRegardless()
-        }
+        let actions = self.actions()
+        OverlayPanelFactory.present(
+            window: self.window,
+            isFirstPresent: isFirst,
+            target: target,
+            onFirstPresent: {
+                self.logger.log(
+                    level: .info,
+                    "overlay present windowShown textLen=\(self.model.text.count, privacy: .public)")
+                // Keep the status item in “listening” mode until we explicitly dismiss the overlay.
+                actions?.didPresent()
+            },
+            onAlreadyVisible: { window in
+                self.updateWindowFrame(animate: true)
+                AppActivation.shared.orderFrontRegardless(window: window)
+            })
     }
 
     private func ensureWindow() {
         if self.window != nil { return }
         let borderPad = self.closeOverflow
-        let panel = NSPanel(
+        let panel = OverlayPanelFactory.makePanel(
             contentRect: NSRect(x: 0, y: 0, width: self.width + borderPad * 2, height: 60 + borderPad * 2),
-            styleMask: [.nonactivatingPanel, .borderless],
-            backing: .buffered,
-            defer: false)
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = false
-        panel.level = Self.preferredWindowLevel
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
-        panel.hidesOnDeactivate = false
-        panel.isMovable = false
-        panel.isFloatingPanel = true
-        panel.becomesKeyOnlyIfNeeded = true
-        panel.titleVisibility = .hidden
-        panel.titlebarAppearsTransparent = true
+            level: Self.preferredWindowLevel,
+            hasShadow: false)
 
         let host = NSHostingView(rootView: VoiceWakeOverlayView(controller: self))
         host.translatesAutoresizingMaskIntoConstraints = false
@@ -67,9 +49,12 @@ extension VoiceWakeOverlayController {
 
     /// Reassert window ordering when other panels are shown.
     func bringToFrontIfVisible() {
+        self.presentation.bringToFront(self)
+    }
+
+    func bringNativeWindowToFront() {
         guard self.model.isVisible, let window = self.window else { return }
-        window.level = Self.preferredWindowLevel
-        window.orderFrontRegardless()
+        AppActivation.shared.orderFrontRegardless(window: window, level: Self.preferredWindowLevel)
     }
 
     func targetFrame() -> NSRect {
@@ -84,16 +69,36 @@ extension VoiceWakeOverlayController {
     }
 
     func updateWindowFrame(animate: Bool = false) {
-        guard let window else { return }
-        let frame = self.targetFrame()
-        if animate {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.12
-                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                window.animator().setFrame(frame, display: true)
+        self.presentation.updateFrame(self, animate)
+    }
+
+    func updateNativeWindowFrame(animate: Bool) {
+        OverlayPanelFactory.applyFrame(window: self.window, target: self.targetFrame(), animate: animate)
+    }
+
+    func animateWindowDismissal(
+        reason: DismissReason,
+        outcome: SendOutcome,
+        completion: @escaping @MainActor @Sendable (DismissalCompletion) -> Void)
+    {
+        guard self.enableUI else {
+            completion(.disabledUI)
+            return
+        }
+        guard let window else {
+            completion(.missingWindow)
+            return
+        }
+        let target = self.dismissTargetFrame(for: window.frame, reason: reason, outcome: outcome)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.18
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            window.animator().setFrame(target, display: true)
+            window.animator().alphaValue = 0
+        } completionHandler: {
+            Task { @MainActor in
+                completion(.animated(finishWindow: { window.orderOut(nil) }))
             }
-        } else {
-            window.setFrame(frame, display: true)
         }
     }
 
@@ -120,11 +125,10 @@ extension VoiceWakeOverlayController {
 
         let contentHeight = ceil(used.height + (textInset.height * 2))
         let total = contentHeight + self.verticalPadding * 2
-        self.model.isOverflowing = total > self.maxHeight
         return max(self.minHeight, min(total, self.maxHeight))
     }
 
-    func dismissTargetFrame(for frame: NSRect, reason: DismissReason, outcome: SendOutcome) -> NSRect? {
+    func dismissTargetFrame(for frame: NSRect, reason: DismissReason, outcome: SendOutcome) -> NSRect {
         switch (reason, outcome) {
         case (.empty, _):
             let scale: CGFloat = 0.95

@@ -1,33 +1,19 @@
-import { listChannelPluginCatalogEntries } from "../channels/plugins/catalog.js";
-import { listChannelPlugins } from "../channels/plugins/index.js";
-import { CHAT_CHANNEL_ORDER } from "../channels/registry.js";
-import { isTruthyEnvValue } from "../infra/env.js";
-import { ensurePluginRegistryLoaded } from "./plugin-registry.js";
-
-function dedupe(values: string[]): string[] {
-  const seen = new Set<string>();
-  const resolved: string[] = [];
-  for (const value of values) {
-    if (!value || seen.has(value)) {
-      continue;
-    }
-    seen.add(value);
-    resolved.push(value);
-  }
-  return resolved;
-}
+import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
+import { readCliStartupMetadata } from "./startup-metadata.js";
 
 export function resolveCliChannelOptions(): string[] {
-  const catalog = listChannelPluginCatalogEntries().map((entry) => entry.id);
-  const base = dedupe([...CHAT_CHANNEL_ORDER, ...catalog]);
-  if (isTruthyEnvValue(process.env.OPENCLAW_EAGER_CHANNEL_OPTIONS)) {
-    ensurePluginRegistryLoaded();
-    const pluginIds = listChannelPlugins().map((plugin) => plugin.id);
-    return dedupe([...base, ...pluginIds]);
+  const parsed = readCliStartupMetadata(import.meta.url);
+  if (parsed && Array.isArray(parsed.channelOptions)) {
+    return uniqueStrings(
+      parsed.channelOptions.filter(
+        (value): value is string => typeof value === "string" && Boolean(value),
+      ),
+    );
   }
-  return base;
+  return [];
 }
 
 export function formatCliChannelOptions(extra: string[] = []): string {
-  return [...extra, ...resolveCliChannelOptions()].join("|");
+  const options = [...extra, ...resolveCliChannelOptions()];
+  return options.length > 0 ? options.join("|") : "channel";
 }

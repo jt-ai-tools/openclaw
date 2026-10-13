@@ -1,5 +1,11 @@
-# googlechat 目錄索引
+# OpenClaw Google Chat
 
-### 子目錄
+Official OpenClaw channel plugin for Google Chat spaces and direct messages.
 
-- [src](src/README.md)
+Install from OpenClaw:
+
+```bash
+openclaw plugins install @openclaw/googlechat
+```
+
+Configure the Google Chat app credentials and allowed spaces in OpenClaw. The plugin lets agents receive Google Chat events and reply through the configured app.

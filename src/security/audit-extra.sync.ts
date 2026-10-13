@@ -1,63 +1,42 @@
-/**
- * Synchronous security audit collector functions.
- *
- * These functions analyze config-based security properties without I/O.
- */
-import type { SandboxToolPolicy } from "../agents/sandbox/types.js";
-import type { OpenClawConfig } from "../config/config.js";
-import type { AgentToolsConfig } from "../config/types.tools.js";
-import { isToolAllowedByPolicies } from "../agents/pi-tools.policy.js";
 import {
-  resolveSandboxConfigForAgent,
-  resolveSandboxToolPolicyForAgent,
-} from "../agents/sandbox.js";
-import { resolveToolProfilePolicy } from "../agents/tool-policy.js";
-import { resolveBrowserConfig } from "../browser/config.js";
+  normalizeOptionalLowercaseString,
+  normalizeOptionalString,
+  normalizeStringifiedOptionalString,
+} from "@openclaw/normalization-core/string-coerce";
+import { listAgentEntries } from "../agents/agent-scope-config.js";
+import { resolveConfiguredToolPolicies } from "../agents/agent-tools.policy.js";
+import { resolveSandboxConfigForAgent } from "../agents/sandbox/config.js";
+import { isDangerousNetworkMode, normalizeNetworkMode } from "../agents/sandbox/network-mode.js";
+import { getBlockedBindReason } from "../agents/sandbox/validate-sandbox-security.js";
+import { isToolAllowedByPolicies } from "../agents/tool-policy-match.js";
 import { formatCliCommand } from "../cli/command-format.js";
-import { resolveGatewayAuth } from "../gateway/auth.js";
+import { describeBinding } from "../commands/agents.binding-format.js";
+import { mergeAccountConfig } from "../config/channel-account-config.js";
+import { hasUnresolvedConfigPath } from "../config/resolution-facts.js";
+import type { GatewayAuthConfig } from "../config/types.gateway.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
+import type { AgentToolsConfig } from "../config/types.tools.js";
+import { resolveGatewayAuthForConfig, type ResolvedGatewayAuth } from "../gateway/auth-resolve.js";
+import { resolveAllowedAgentIds } from "../gateway/hooks-policy.js";
+import {
+  DEFAULT_DANGEROUS_NODE_COMMANDS,
+  listDangerousPluginNodeCommands,
+  resolveNodePairingCommandAllowlist,
+} from "../gateway/node-command-policy.js";
+import { listEffectiveGroupRouteBindings } from "../routing/resolve-route.js";
+import { levenshteinDistance } from "../shared/levenshtein-distance.js";
+import type { SecurityAuditFinding } from "./audit.types.js";
+import { GATEWAY_CONTROL_PLANE_TOOLS } from "./dangerous-tools.js";
 
-export type SecurityAuditFinding = {
-  checkId: string;
-  severity: "info" | "warn" | "critical";
-  title: string;
-  detail: string;
-  remediation?: string;
+type GatewayAuthAuditOptions = {
+  gatewayAuthOverride?: Pick<GatewayAuthConfig, "mode" | "token" | "password">;
 };
 
-const SMALL_MODEL_PARAM_B_MAX = 300;
-
-// --------------------------------------------------------------------------
-// Helpers
-// --------------------------------------------------------------------------
-
-function summarizeGroupPolicy(cfg: OpenClawConfig): {
-  open: number;
-  allowlist: number;
-  other: number;
-} {
-  const channels = cfg.channels as Record<string, unknown> | undefined;
-  if (!channels || typeof channels !== "object") {
-    return { open: 0, allowlist: 0, other: 0 };
-  }
-  let open = 0;
-  let allowlist = 0;
-  let other = 0;
-  for (const value of Object.values(channels)) {
-    if (!value || typeof value !== "object") {
-      continue;
-    }
-    const section = value as Record<string, unknown>;
-    const policy = section.groupPolicy;
-    if (policy === "open") {
-      open += 1;
-    } else if (policy === "allowlist") {
-      allowlist += 1;
-    } else {
-      other += 1;
-    }
-  }
-  return { open, allowlist, other };
-}
+type GatewayAuthSharedSecretLabel = "gateway auth token" | "gateway auth password";
+type GatewayAuthSharedSecretReuse = {
+  label: GatewayAuthSharedSecretLabel;
+  source: "config" | "override";
+};
 
 function isProbablySyncedPath(p: string): boolean {
   const s = p.toLowerCase();
@@ -70,11 +49,6 @@ function isProbablySyncedPath(p: string): boolean {
   );
 }
 
-function looksLikeEnvRef(value: string): boolean {
-  const v = value.trim();
-  return v.startsWith("${") && v.endsWith("}");
-}
-
 function isGatewayRemotelyExposed(cfg: OpenClawConfig): boolean {
   const bind = typeof cfg.gateway?.bind === "string" ? cfg.gateway.bind : "loopback";
   if (bind !== "loopback") {
@@ -84,202 +58,162 @@ function isGatewayRemotelyExposed(cfg: OpenClawConfig): boolean {
   return tailscaleMode === "serve" || tailscaleMode === "funnel";
 }
 
-type ModelRef = { id: string; source: string };
-
-function addModel(models: ModelRef[], raw: unknown, source: string) {
-  if (typeof raw !== "string") {
-    return;
-  }
-  const id = raw.trim();
-  if (!id) {
-    return;
-  }
-  models.push({ id, source });
-}
-
-function collectModels(cfg: OpenClawConfig): ModelRef[] {
-  const out: ModelRef[] = [];
-  addModel(out, cfg.agents?.defaults?.model?.primary, "agents.defaults.model.primary");
-  for (const f of cfg.agents?.defaults?.model?.fallbacks ?? []) {
-    addModel(out, f, "agents.defaults.model.fallbacks");
-  }
-  addModel(out, cfg.agents?.defaults?.imageModel?.primary, "agents.defaults.imageModel.primary");
-  for (const f of cfg.agents?.defaults?.imageModel?.fallbacks ?? []) {
-    addModel(out, f, "agents.defaults.imageModel.fallbacks");
-  }
-
-  const list = Array.isArray(cfg.agents?.list) ? cfg.agents?.list : [];
-  for (const agent of list ?? []) {
-    if (!agent || typeof agent !== "object") {
+function findHooksTokenGatewayAuthReuse(params: {
+  hooksToken: string;
+  configGatewayAuth: ResolvedGatewayAuth;
+  overrideGatewayAuth?: ResolvedGatewayAuth;
+}): GatewayAuthSharedSecretReuse | undefined {
+  for (const [source, auth] of [
+    ["config", params.configGatewayAuth],
+    ["override", params.overrideGatewayAuth],
+  ] as const) {
+    if (!auth) {
       continue;
     }
-    const id =
-      typeof (agent as { id?: unknown }).id === "string" ? (agent as { id: string }).id : "";
-    const model = (agent as { model?: unknown }).model;
-    if (typeof model === "string") {
-      addModel(out, model, `agents.list.${id}.model`);
-    } else if (model && typeof model === "object") {
-      addModel(out, (model as { primary?: unknown }).primary, `agents.list.${id}.model.primary`);
-      const fallbacks = (model as { fallbacks?: unknown }).fallbacks;
-      if (Array.isArray(fallbacks)) {
-        for (const f of fallbacks) {
-          addModel(out, f, `agents.list.${id}.model.fallbacks`);
-        }
+    if (auth.mode === "token" && normalizeOptionalString(auth.token) === params.hooksToken) {
+      return { label: "gateway auth token", source };
+    }
+    if (
+      (auth.mode === "password" || auth.mode === "trusted-proxy") &&
+      normalizeOptionalString(auth.password) === params.hooksToken
+    ) {
+      return { label: "gateway auth password", source };
+    }
+  }
+  return undefined;
+}
+
+function hasResolvedGatewayHttpAuth(auth: ResolvedGatewayAuth): boolean {
+  if (auth.mode === "token") {
+    return Boolean(normalizeOptionalString(auth.token));
+  }
+  if (auth.mode === "password") {
+    return Boolean(normalizeOptionalString(auth.password));
+  }
+  if (auth.mode === "trusted-proxy") {
+    return true;
+  }
+  return false;
+}
+
+function hasConfiguredDockerConfig(
+  docker: Record<string, unknown> | undefined | null,
+): docker is Record<string, unknown> {
+  if (!docker || typeof docker !== "object") {
+    return false;
+  }
+  return Object.values(docker).some((value) => value !== undefined);
+}
+
+function normalizeNodeCommand(value: unknown): string {
+  return normalizeOptionalString(value) ?? "";
+}
+
+function isWildcardEntry(value: unknown): boolean {
+  return normalizeStringifiedOptionalString(value) === "*";
+}
+
+function listKnownNodeCommands(cfg: OpenClawConfig): Set<string> {
+  const baseCfg: OpenClawConfig = {
+    ...cfg,
+    gateway: {
+      ...cfg.gateway,
+      nodes: {
+        ...cfg.gateway?.nodes,
+        commands: { ...cfg.gateway?.nodes?.commands, deny: [] },
+      },
+    },
+  };
+  const out = new Set<string>();
+  const platformNodes = [
+    { platform: "ios", deviceFamily: "iPhone" },
+    { platform: "android", deviceFamily: "Android" },
+    { platform: "macos", deviceFamily: "Mac" },
+    { platform: "linux", deviceFamily: "Linux" },
+    { platform: "windows", deviceFamily: "Windows" },
+    { platform: "unknown" },
+  ];
+  for (const commands of [
+    ...platformNodes.map((node) => resolveNodePairingCommandAllowlist(baseCfg, node)),
+    resolveNodePairingCommandAllowlist(baseCfg, { caps: ["talk"] }),
+    DEFAULT_DANGEROUS_NODE_COMMANDS,
+  ]) {
+    for (const cmd of commands) {
+      const normalized = normalizeNodeCommand(cmd);
+      if (normalized) {
+        out.add(normalized);
       }
     }
   }
   return out;
 }
 
-const LEGACY_MODEL_PATTERNS: Array<{ id: string; re: RegExp; label: string }> = [
-  { id: "openai.gpt35", re: /\bgpt-3\.5\b/i, label: "GPT-3.5 family" },
-  { id: "anthropic.claude2", re: /\bclaude-(instant|2)\b/i, label: "Claude 2/Instant family" },
-  { id: "openai.gpt4_legacy", re: /\bgpt-4-(0314|0613)\b/i, label: "Legacy GPT-4 snapshots" },
-];
-
-const WEAK_TIER_MODEL_PATTERNS: Array<{ id: string; re: RegExp; label: string }> = [
-  { id: "anthropic.haiku", re: /\bhaiku\b/i, label: "Haiku tier (smaller model)" },
-];
-
-function inferParamBFromIdOrName(text: string): number | null {
-  const raw = text.toLowerCase();
-  const matches = raw.matchAll(/(?:^|[^a-z0-9])[a-z]?(\d+(?:\.\d+)?)b(?:[^a-z0-9]|$)/g);
-  let best: number | null = null;
-  for (const match of matches) {
-    const numRaw = match[1];
-    if (!numRaw) {
-      continue;
-    }
-    const value = Number(numRaw);
-    if (!Number.isFinite(value) || value <= 0) {
-      continue;
-    }
-    if (best === null || value > best) {
-      best = value;
-    }
-  }
-  return best;
-}
-
-function isGptModel(id: string): boolean {
-  return /\bgpt-/i.test(id);
-}
-
-function isGpt5OrHigher(id: string): boolean {
-  return /\bgpt-5(?:\b|[.-])/i.test(id);
-}
-
-function isClaudeModel(id: string): boolean {
-  return /\bclaude-/i.test(id);
-}
-
-function isClaude45OrHigher(id: string): boolean {
-  // Match claude-*-4-5+, claude-*-45+, claude-*4.5+, or future 5.x+ majors.
-  return /\bclaude-[^\s/]*?(?:-4-?(?:[5-9]|[1-9]\d)\b|4\.(?:[5-9]|[1-9]\d)\b|-[5-9](?:\b|[.-]))/i.test(
-    id,
-  );
-}
-
-function extractAgentIdFromSource(source: string): string | null {
-  const match = source.match(/^agents\.list\.([^.]*)\./);
-  return match?.[1] ?? null;
-}
-
-function pickToolPolicy(config?: { allow?: string[]; deny?: string[] }): SandboxToolPolicy | null {
-  if (!config) {
-    return null;
-  }
-  const allow = Array.isArray(config.allow) ? config.allow : undefined;
-  const deny = Array.isArray(config.deny) ? config.deny : undefined;
-  if (!allow && !deny) {
-    return null;
-  }
-  return { allow, deny };
-}
-
-function resolveToolPolicies(params: {
-  cfg: OpenClawConfig;
-  agentTools?: AgentToolsConfig;
-  sandboxMode?: "off" | "non-main" | "all";
-  agentId?: string | null;
-}): SandboxToolPolicy[] {
-  const policies: SandboxToolPolicy[] = [];
-  const profile = params.agentTools?.profile ?? params.cfg.tools?.profile;
-  const profilePolicy = resolveToolProfilePolicy(profile);
-  if (profilePolicy) {
-    policies.push(profilePolicy);
-  }
-
-  const globalPolicy = pickToolPolicy(params.cfg.tools ?? undefined);
-  if (globalPolicy) {
-    policies.push(globalPolicy);
-  }
-
-  const agentPolicy = pickToolPolicy(params.agentTools);
-  if (agentPolicy) {
-    policies.push(agentPolicy);
-  }
-
-  if (params.sandboxMode === "all") {
-    const sandboxPolicy = resolveSandboxToolPolicyForAgent(params.cfg, params.agentId ?? undefined);
-    policies.push(sandboxPolicy);
-  }
-
-  return policies;
-}
-
-function hasWebSearchKey(cfg: OpenClawConfig, env: NodeJS.ProcessEnv): boolean {
-  const search = cfg.tools?.web?.search;
-  return Boolean(
-    search?.apiKey ||
-    search?.perplexity?.apiKey ||
-    env.BRAVE_API_KEY ||
-    env.PERPLEXITY_API_KEY ||
-    env.OPENROUTER_API_KEY,
-  );
-}
-
-function isWebSearchEnabled(cfg: OpenClawConfig, env: NodeJS.ProcessEnv): boolean {
-  const enabled = cfg.tools?.web?.search?.enabled;
-  if (enabled === false) {
-    return false;
-  }
-  if (enabled === true) {
+function looksLikeNodeCommandPattern(value: string): boolean {
+  if (/[?*[\]{}(),|]/.test(value)) {
     return true;
   }
-  return hasWebSearchKey(cfg, env);
-}
-
-function isWebFetchEnabled(cfg: OpenClawConfig): boolean {
-  const enabled = cfg.tools?.web?.fetch?.enabled;
-  if (enabled === false) {
-    return false;
-  }
-  return true;
-}
-
-function isBrowserEnabled(cfg: OpenClawConfig): boolean {
-  try {
-    return resolveBrowserConfig(cfg.browser, cfg).enabled;
-  } catch {
+  if (
+    value.startsWith("/") ||
+    value.endsWith("/") ||
+    value.startsWith("^") ||
+    value.endsWith("$")
+  ) {
     return true;
   }
+  return /\s/.test(value) || value.includes("group:");
 }
 
-function listGroupPolicyOpen(cfg: OpenClawConfig): string[] {
+function suggestKnownNodeCommands(needle: string, known: Set<string>): string[] {
+  // Fast path: prefix-ish suggestions.
+  const prefix = needle.includes(".") ? needle.split(".").slice(0, 2).join(".") : needle;
+  const prefixHits = Array.from(known)
+    .filter((cmd) => cmd.startsWith(prefix))
+    .slice(0, 3);
+  if (prefixHits.length > 0) {
+    return prefixHits;
+  }
+
+  // Fuzzy: Levenshtein over a small-ish known set.
+  const ranked = Array.from(known)
+    .map((cmd) => ({ cmd, d: levenshteinDistance(needle, cmd) }))
+    .toSorted((a, b) => a.d - b.d || a.cmd.localeCompare(b.cmd));
+
+  const best = ranked[0]?.d ?? Infinity;
+  const threshold = Math.max(2, Math.min(4, best));
+  return ranked
+    .filter((r) => r.d <= threshold)
+    .slice(0, 3)
+    .map((r) => r.cmd);
+}
+
+function listOpenInboundPolicies(cfg: OpenClawConfig): string[] {
   const out: string[] = [];
   const channels = cfg.channels as Record<string, unknown> | undefined;
   if (!channels || typeof channels !== "object") {
     return out;
   }
+
+  const inspectSection = (section: Record<string, unknown>, basePath: string) => {
+    if (section.groupPolicy === "open") {
+      out.push(`${basePath}.groupPolicy`);
+    }
+    const dm = section.dm;
+    const legacyDmPolicy =
+      dm && typeof dm === "object" ? (dm as Record<string, unknown>).policy : undefined;
+    const dmPolicy = section.dmPolicy ?? legacyDmPolicy;
+    if (dmPolicy === "open") {
+      out.push(`${basePath}.${section.dmPolicy == null ? "dm.policy" : "dmPolicy"}`);
+    }
+  };
+
   for (const [channelId, value] of Object.entries(channels)) {
     if (!value || typeof value !== "object") {
       continue;
     }
     const section = value as Record<string, unknown>;
-    if (section.groupPolicy === "open") {
-      out.push(`channels.${channelId}.groupPolicy`);
-    }
+    // Root policy can govern an implicit/default env-backed account. Named account overrides
+    // do not prove this scope is inactive, so audit it independently.
+    inspectSection(section, `channels.${channelId}`);
     const accounts = section.accounts;
     if (accounts && typeof accounts === "object") {
       for (const [accountId, accountVal] of Object.entries(accounts)) {
@@ -287,42 +221,174 @@ function listGroupPolicyOpen(cfg: OpenClawConfig): string[] {
           continue;
         }
         const acc = accountVal as Record<string, unknown>;
-        if (acc.groupPolicy === "open") {
-          out.push(`channels.${channelId}.accounts.${accountId}.groupPolicy`);
-        }
+        inspectSection(acc, `channels.${channelId}.accounts.${accountId}`);
       }
     }
   }
   return out;
 }
 
-// --------------------------------------------------------------------------
-// Exported collectors
-// --------------------------------------------------------------------------
+function hasConfiguredGroupTargets(section: Record<string, unknown>): boolean {
+  const groupKeys = ["groups", "guilds", "channels", "rooms"];
+  return groupKeys.some((key) => {
+    const value = section[key];
+    return Boolean(value && typeof value === "object" && Object.keys(value).length > 0);
+  });
+}
 
-export function collectAttackSurfaceSummaryFindings(cfg: OpenClawConfig): SecurityAuditFinding[] {
-  const group = summarizeGroupPolicy(cfg);
-  const elevated = cfg.tools?.elevated?.enabled !== false;
-  const hooksEnabled = cfg.hooks?.enabled === true;
-  const browserEnabled = cfg.browser?.enabled ?? true;
+export function listPotentialMultiUserSignals(cfg: OpenClawConfig): string[] {
+  const out = new Set<string>();
+  const channels = cfg.channels as Record<string, unknown> | undefined;
+  if (!channels || typeof channels !== "object") {
+    return [];
+  }
 
-  const detail =
-    `groups: open=${group.open}, allowlist=${group.allowlist}` +
-    `\n` +
-    `tools.elevated: ${elevated ? "enabled" : "disabled"}` +
-    `\n` +
-    `hooks: ${hooksEnabled ? "enabled" : "disabled"}` +
-    `\n` +
-    `browser control: ${browserEnabled ? "enabled" : "disabled"}`;
+  const inspectSection = (section: Record<string, unknown>, basePath: string) => {
+    const groupPolicy = typeof section.groupPolicy === "string" ? section.groupPolicy : null;
+    if (groupPolicy === "open") {
+      out.add(`${basePath}.groupPolicy="open"`);
+    } else if (groupPolicy === "allowlist" && hasConfiguredGroupTargets(section)) {
+      out.add(`${basePath}.groupPolicy="allowlist" with configured group targets`);
+    }
 
-  return [
-    {
-      checkId: "summary.attack_surface",
-      severity: "info",
-      title: "Attack surface summary",
-      detail,
-    },
-  ];
+    const dmPolicy = typeof section.dmPolicy === "string" ? section.dmPolicy : null;
+    if (dmPolicy === "open") {
+      out.add(`${basePath}.dmPolicy="open"`);
+    }
+
+    const allowFrom = Array.isArray(section.allowFrom) ? section.allowFrom : [];
+    if (allowFrom.some((entry) => isWildcardEntry(entry))) {
+      out.add(`${basePath}.allowFrom includes "*"`);
+    }
+
+    const groupAllowFrom = Array.isArray(section.groupAllowFrom) ? section.groupAllowFrom : [];
+    if (groupAllowFrom.some((entry) => isWildcardEntry(entry))) {
+      out.add(`${basePath}.groupAllowFrom includes "*"`);
+    }
+
+    const dm = section.dm;
+    if (dm && typeof dm === "object") {
+      const dmSection = dm as Record<string, unknown>;
+      const dmLegacyPolicy = typeof dmSection.policy === "string" ? dmSection.policy : null;
+      if (dmLegacyPolicy === "open") {
+        out.add(`${basePath}.dm.policy="open"`);
+      }
+      const dmAllowFrom = Array.isArray(dmSection.allowFrom) ? dmSection.allowFrom : [];
+      if (dmAllowFrom.some((entry) => isWildcardEntry(entry))) {
+        out.add(`${basePath}.dm.allowFrom includes "*"`);
+      }
+    }
+  };
+
+  for (const [channelId, value] of Object.entries(channels)) {
+    if (!value || typeof value !== "object") {
+      continue;
+    }
+    const section = value as Record<string, unknown>;
+    inspectSection(section, `channels.${channelId}`);
+    const accounts = section.accounts;
+    if (!accounts || typeof accounts !== "object") {
+      continue;
+    }
+    for (const [accountId, accountValue] of Object.entries(accounts)) {
+      if (!accountValue || typeof accountValue !== "object") {
+        continue;
+      }
+      inspectSection(
+        mergeAccountConfig({
+          channelConfig: section,
+          accountConfig: accountValue as Record<string, unknown>,
+        }),
+        `channels.${channelId}.accounts.${accountId}`,
+      );
+    }
+  }
+
+  return Array.from(out);
+}
+
+type AuditAgentToolContext = {
+  label: string;
+  agentId?: string;
+  tools?: AgentToolsConfig;
+};
+
+function listAuditAgentToolContexts(cfg: OpenClawConfig): AuditAgentToolContext[] {
+  const contexts: AuditAgentToolContext[] = [{ label: "agents.defaults" }];
+  for (const agent of listAgentEntries(cfg)) {
+    if (!agent || typeof agent !== "object" || typeof agent.id !== "string") {
+      continue;
+    }
+    contexts.push({
+      label: `agents.entries.${agent.id}`,
+      agentId: agent.id,
+      tools: agent.tools,
+    });
+  }
+  return contexts;
+}
+
+function collectRiskyToolExposureContexts(cfg: OpenClawConfig): {
+  riskyContexts: string[];
+  hasRuntimeRisk: boolean;
+} {
+  const riskyContexts: string[] = [];
+  let hasRuntimeRisk = false;
+  for (const context of listAuditAgentToolContexts(cfg)) {
+    const sandboxMode = resolveSandboxConfigForAgent(cfg, context.agentId).mode;
+    const policies = resolveConfiguredToolPolicies({
+      cfg,
+      agentTools: context.tools,
+      sandboxMode,
+      agentId: context.agentId ?? null,
+    });
+    const runtimeTools = ["exec", "process"].filter((tool) =>
+      isToolAllowedByPolicies(tool, policies),
+    );
+    const fsTools = ["read", "write", "edit", "apply_patch"].filter((tool) =>
+      isToolAllowedByPolicies(tool, policies),
+    );
+    const fsWorkspaceOnly = context.tools?.fs?.workspaceOnly ?? cfg.tools?.fs?.workspaceOnly;
+    const runtimeUnguarded = runtimeTools.length > 0 && sandboxMode !== "all";
+    const fsUnguarded = fsTools.length > 0 && sandboxMode !== "all" && fsWorkspaceOnly !== true;
+    if (!runtimeUnguarded && !fsUnguarded) {
+      continue;
+    }
+    if (runtimeUnguarded) {
+      hasRuntimeRisk = true;
+    }
+    riskyContexts.push(
+      `${context.label} (sandbox=${sandboxMode}; runtime=[${runtimeTools.join(", ") || "off"}]; fs=[${fsTools.join(", ") || "off"}]; fs.workspaceOnly=${
+        fsWorkspaceOnly === true ? "true" : "false"
+      })`,
+    );
+  }
+
+  return { riskyContexts, hasRuntimeRisk };
+}
+
+function collectControlPlaneToolExposureContexts(cfg: OpenClawConfig): string[] {
+  const exposedContexts: string[] = [];
+  for (const context of listAuditAgentToolContexts(cfg)) {
+    const sandboxMode = resolveSandboxConfigForAgent(cfg, context.agentId).mode;
+    const policies = resolveConfiguredToolPolicies({
+      cfg,
+      agentTools: context.tools,
+      sandboxMode,
+      agentId: context.agentId ?? null,
+    });
+    const controlPlaneTools = GATEWAY_CONTROL_PLANE_TOOLS.filter((tool) =>
+      isToolAllowedByPolicies(tool, policies),
+    );
+    if (controlPlaneTools.length === 0) {
+      continue;
+    }
+    const profile = context.tools?.profile ?? cfg.tools?.profile ?? "none";
+    exposedContexts.push(
+      `${context.label} (profile=${profile}; controlPlane=[${controlPlaneTools.join(", ")}])`,
+    );
+  }
+  return exposedContexts;
 }
 
 export function collectSyncedFolderFindings(params: {
@@ -344,9 +410,8 @@ export function collectSyncedFolderFindings(params: {
 
 export function collectSecretsInConfigFindings(cfg: OpenClawConfig): SecurityAuditFinding[] {
   const findings: SecurityAuditFinding[] = [];
-  const password =
-    typeof cfg.gateway?.auth?.password === "string" ? cfg.gateway.auth.password.trim() : "";
-  if (password && !looksLikeEnvRef(password)) {
+  const password = normalizeOptionalString(cfg.gateway?.auth?.password) ?? "";
+  if (password && !hasUnresolvedConfigPath(cfg, "gateway.auth.password")) {
     findings.push({
       checkId: "config.secrets.gateway_password_in_config",
       severity: "warn",
@@ -358,8 +423,8 @@ export function collectSecretsInConfigFindings(cfg: OpenClawConfig): SecurityAud
     });
   }
 
-  const hooksToken = typeof cfg.hooks?.token === "string" ? cfg.hooks.token.trim() : "";
-  if (cfg.hooks?.enabled === true && hooksToken && !looksLikeEnvRef(hooksToken)) {
+  const hooksToken = normalizeOptionalString(cfg.hooks?.token) ?? "";
+  if (cfg.hooks?.enabled === true && hooksToken && !hasUnresolvedConfigPath(cfg, "hooks.token")) {
     findings.push({
       checkId: "config.secrets.hooks_token_in_config",
       severity: "info",
@@ -372,13 +437,17 @@ export function collectSecretsInConfigFindings(cfg: OpenClawConfig): SecurityAud
   return findings;
 }
 
-export function collectHooksHardeningFindings(cfg: OpenClawConfig): SecurityAuditFinding[] {
+export function collectHooksHardeningFindings(
+  cfg: OpenClawConfig,
+  env: NodeJS.ProcessEnv = process.env,
+  options: GatewayAuthAuditOptions = {},
+): SecurityAuditFinding[] {
   const findings: SecurityAuditFinding[] = [];
   if (cfg.hooks?.enabled !== true) {
     return findings;
   }
 
-  const token = typeof cfg.hooks?.token === "string" ? cfg.hooks.token.trim() : "";
+  const token = normalizeOptionalString(cfg.hooks?.token) ?? "";
   if (token && token.length < 24) {
     findings.push({
       checkId: "hooks.token_too_short",
@@ -388,28 +457,41 @@ export function collectHooksHardeningFindings(cfg: OpenClawConfig): SecurityAudi
     });
   }
 
-  const gatewayAuth = resolveGatewayAuth({
-    authConfig: cfg.gateway?.auth,
+  const configGatewayAuth = resolveGatewayAuthForConfig({
+    config: cfg,
     tailscaleMode: cfg.gateway?.tailscale?.mode ?? "off",
+    env,
   });
-  const gatewayToken =
-    gatewayAuth.mode === "token" &&
-    typeof gatewayAuth.token === "string" &&
-    gatewayAuth.token.trim()
-      ? gatewayAuth.token.trim()
-      : null;
-  if (token && gatewayToken && token === gatewayToken) {
+  const overrideGatewayAuth = options.gatewayAuthOverride
+    ? resolveGatewayAuthForConfig({
+        config: cfg,
+        authOverride: options.gatewayAuthOverride,
+        tailscaleMode: cfg.gateway?.tailscale?.mode ?? "off",
+        env,
+      })
+    : undefined;
+  const reusedGatewayAuth = findHooksTokenGatewayAuthReuse({
+    hooksToken: token,
+    configGatewayAuth,
+    overrideGatewayAuth,
+  });
+  if (reusedGatewayAuth) {
+    const password = reusedGatewayAuth.label === "gateway auth password";
     findings.push({
       checkId: "hooks.token_reuse_gateway_token",
-      severity: "warn",
-      title: "Hooks token reuses the Gateway token",
-      detail:
-        "hooks.token matches gateway.auth token; compromise of hooks expands blast radius to the Gateway API.",
-      remediation: "Use a separate hooks.token dedicated to hook ingress.",
+      severity: "critical",
+      title: `Hooks token reuses the Gateway ${password ? "password" : "token"}`,
+      detail: password
+        ? "hooks.token matches gateway.auth password; compromise of hooks expands blast radius to Gateway password auth."
+        : "hooks.token matches gateway.auth token; compromise of hooks expands blast radius to the Gateway API.",
+      remediation:
+        reusedGatewayAuth.source === "override"
+          ? "Rotate hooks.token or the runtime Gateway shared-secret auth value used for this audit; doctor can only repair reuse that is present in persisted config or process env."
+          : `Run ${formatCliCommand("openclaw doctor --fix")} to rotate a persisted hooks.token, then update external hook senders to use the new hook token.`,
     });
   }
 
-  const rawPath = typeof cfg.hooks?.path === "string" ? cfg.hooks.path.trim() : "";
+  const rawPath = normalizeOptionalString(cfg.hooks?.path) ?? "";
   if (rawPath === "/") {
     findings.push({
       checkId: "hooks.path_root",
@@ -421,8 +503,8 @@ export function collectHooksHardeningFindings(cfg: OpenClawConfig): SecurityAudi
   }
 
   const allowRequestSessionKey = cfg.hooks?.allowRequestSessionKey === true;
-  const defaultSessionKey =
-    typeof cfg.hooks?.defaultSessionKey === "string" ? cfg.hooks.defaultSessionKey.trim() : "";
+  const defaultSessionKey = normalizeOptionalString(cfg.hooks?.defaultSessionKey) ?? "";
+  const allowedAgentIds = resolveAllowedAgentIds(cfg.hooks?.allowedAgentIds);
   const allowedPrefixes = Array.isArray(cfg.hooks?.allowedSessionKeyPrefixes)
     ? cfg.hooks.allowedSessionKeyPrefixes
         .map((prefix) => prefix.trim())
@@ -438,6 +520,18 @@ export function collectHooksHardeningFindings(cfg: OpenClawConfig): SecurityAudi
       detail:
         "Hook agent runs without explicit sessionKey use generated per-request keys. Set hooks.defaultSessionKey to keep hook ingress scoped to a known session.",
       remediation: 'Set hooks.defaultSessionKey (for example, "hook:ingress").',
+    });
+  }
+
+  if (allowedAgentIds === undefined) {
+    findings.push({
+      checkId: "hooks.allowed_agent_ids_unrestricted",
+      severity: remoteExposure ? "critical" : "warn",
+      title: "Hook agent routing allows any configured agent",
+      detail:
+        "hooks.allowedAgentIds is unset or includes '*', so authenticated hook callers may route to any configured agent id, including the default agent when agentId is omitted.",
+      remediation:
+        'Set hooks.allowedAgentIds to an explicit allowlist (for example, ["hooks", "main"]) or [] to deny hook agent routing.',
     });
   }
 
@@ -468,181 +562,362 @@ export function collectHooksHardeningFindings(cfg: OpenClawConfig): SecurityAudi
   return findings;
 }
 
-export function collectModelHygieneFindings(cfg: OpenClawConfig): SecurityAuditFinding[] {
+export function collectGatewayHttpSessionKeyOverrideFindings(
+  cfg: OpenClawConfig,
+): SecurityAuditFinding[] {
   const findings: SecurityAuditFinding[] = [];
-  const models = collectModels(cfg);
-  if (models.length === 0) {
+  const chatCompletionsEnabled = cfg.gateway?.http?.endpoints?.chatCompletions?.enabled === true;
+  const responsesEnabled = cfg.gateway?.http?.endpoints?.responses?.enabled === true;
+  if (!chatCompletionsEnabled && !responsesEnabled) {
     return findings;
   }
 
-  const weakMatches = new Map<string, { model: string; source: string; reasons: string[] }>();
-  const addWeakMatch = (model: string, source: string, reason: string) => {
-    const key = `${model}@@${source}`;
-    const existing = weakMatches.get(key);
-    if (!existing) {
-      weakMatches.set(key, { model, source, reasons: [reason] });
-      return;
-    }
-    if (!existing.reasons.includes(reason)) {
-      existing.reasons.push(reason);
-    }
-  };
+  const enabledEndpoints = [
+    chatCompletionsEnabled ? "/v1/chat/completions" : null,
+    responsesEnabled ? "/v1/responses" : null,
+  ].filter((entry): entry is string => Boolean(entry));
 
-  for (const entry of models) {
-    for (const pat of WEAK_TIER_MODEL_PATTERNS) {
-      if (pat.re.test(entry.id)) {
-        addWeakMatch(entry.id, entry.source, pat.label);
-        break;
-      }
+  findings.push({
+    checkId: "gateway.http.session_key_override_enabled",
+    severity: "info",
+    title: "HTTP API session-key override is enabled",
+    detail:
+      `${enabledEndpoints.join(", ")} accept x-openclaw-session-key for per-request session routing. ` +
+      "Treat API credential holders as trusted principals.",
+  });
+
+  return findings;
+}
+
+export function collectGatewayHttpNoAuthFindings(
+  cfg: OpenClawConfig,
+  env: NodeJS.ProcessEnv,
+  options: GatewayAuthAuditOptions = {},
+): SecurityAuditFinding[] {
+  const findings: SecurityAuditFinding[] = [];
+  const tailscaleMode = cfg.gateway?.tailscale?.mode ?? "off";
+  const auth = resolveGatewayAuthForConfig({
+    config: cfg,
+    authOverride: options.gatewayAuthOverride,
+    tailscaleMode,
+    env,
+  });
+  if (hasResolvedGatewayHttpAuth(auth)) {
+    return findings;
+  }
+
+  const chatCompletionsEnabled = cfg.gateway?.http?.endpoints?.chatCompletions?.enabled === true;
+  const responsesEnabled = cfg.gateway?.http?.endpoints?.responses?.enabled === true;
+  const adminHttpRpcEnabled = cfg.plugins?.entries?.["admin-http-rpc"]?.enabled === true;
+  const enabledEndpoints = [
+    "/tools/invoke",
+    chatCompletionsEnabled ? "/v1/chat/completions" : null,
+    responsesEnabled ? "/v1/responses" : null,
+    adminHttpRpcEnabled ? "/api/v1/admin/rpc" : null,
+  ].filter((entry): entry is string => Boolean(entry));
+
+  const remoteExposure = isGatewayRemotelyExposed(cfg);
+  findings.push({
+    checkId: "gateway.http.no_auth",
+    severity: remoteExposure ? "critical" : "warn",
+    title: "Gateway HTTP APIs are reachable without auth",
+    detail:
+      `gateway.auth.mode="none" leaves ${enabledEndpoints.join(", ")} callable without a shared secret. ` +
+      "Treat this as trusted-local only and avoid exposing the gateway beyond loopback.",
+    remediation:
+      "Set gateway.auth.mode to token/password (recommended). If you intentionally keep mode=none, keep gateway.bind=loopback and disable optional HTTP endpoints/plugins.",
+  });
+
+  return findings;
+}
+
+export function collectSandboxDockerNoopFindings(cfg: OpenClawConfig): SecurityAuditFinding[] {
+  const findings: SecurityAuditFinding[] = [];
+  const configuredPaths: string[] = [];
+  const agents = listAgentEntries(cfg);
+
+  const defaultsSandbox = cfg.agents?.defaults?.sandbox;
+  const hasDefaultDocker = hasConfiguredDockerConfig(
+    defaultsSandbox?.docker as Record<string, unknown> | undefined,
+  );
+  const defaultMode = defaultsSandbox?.mode ?? "off";
+  const hasAnySandboxEnabledAgent = agents.some((entry) => {
+    if (!entry || typeof entry !== "object" || typeof entry.id !== "string") {
+      return false;
     }
-    if (isGptModel(entry.id) && !isGpt5OrHigher(entry.id)) {
-      addWeakMatch(entry.id, entry.source, "Below GPT-5 family");
+    return resolveSandboxConfigForAgent(cfg, entry.id).mode !== "off";
+  });
+  if (hasDefaultDocker && defaultMode === "off" && !hasAnySandboxEnabledAgent) {
+    configuredPaths.push("agents.defaults.sandbox.docker");
+  }
+
+  for (const entry of agents) {
+    if (!entry || typeof entry !== "object" || typeof entry.id !== "string") {
+      continue;
     }
-    if (isClaudeModel(entry.id) && !isClaude45OrHigher(entry.id)) {
-      addWeakMatch(entry.id, entry.source, "Below Claude 4.5");
+    if (!hasConfiguredDockerConfig(entry.sandbox?.docker as Record<string, unknown> | undefined)) {
+      continue;
+    }
+    if (resolveSandboxConfigForAgent(cfg, entry.id).mode === "off") {
+      configuredPaths.push(`agents.entries.${entry.id}.sandbox.docker`);
     }
   }
 
-  const matches: Array<{ model: string; source: string; reason: string }> = [];
-  for (const entry of models) {
-    for (const pat of LEGACY_MODEL_PATTERNS) {
-      if (pat.re.test(entry.id)) {
-        matches.push({ model: entry.id, source: entry.source, reason: pat.label });
-        break;
-      }
-    }
+  if (configuredPaths.length === 0) {
+    return findings;
   }
 
-  if (matches.length > 0) {
-    const lines = matches
-      .slice(0, 12)
-      .map((m) => `- ${m.model} (${m.reason}) @ ${m.source}`)
-      .join("\n");
-    const more = matches.length > 12 ? `\n…${matches.length - 12} more` : "";
-    findings.push({
-      checkId: "models.legacy",
-      severity: "warn",
-      title: "Some configured models look legacy",
-      detail:
-        "Older/legacy models can be less robust against prompt injection and tool misuse.\n" +
-        lines +
-        more,
-      remediation: "Prefer modern, instruction-hardened models for any bot that can run tools.",
+  findings.push({
+    checkId: "sandbox.docker_config_mode_off",
+    severity: "warn",
+    title: "Sandbox docker settings configured while sandbox mode is off",
+    detail:
+      "These docker settings will not take effect until sandbox mode is enabled:\n" +
+      configuredPaths.map((entry) => `- ${entry}`).join("\n"),
+    remediation:
+      'Enable sandbox mode (`agents.defaults.sandbox.mode="non-main"` or `"all"`) where needed, or remove unused docker settings.',
+  });
+
+  return findings;
+}
+
+export function collectSandboxDangerousConfigFindings(cfg: OpenClawConfig): SecurityAuditFinding[] {
+  const findings: SecurityAuditFinding[] = [];
+  const agents = listAgentEntries(cfg);
+
+  const configs: Array<{ source: string; docker: Record<string, unknown> }> = [];
+  const defaultDocker = cfg.agents?.defaults?.sandbox?.docker;
+  if (defaultDocker && typeof defaultDocker === "object") {
+    configs.push({
+      source: "agents.defaults.sandbox.docker",
+      docker: defaultDocker as Record<string, unknown>,
     });
   }
+  for (const entry of agents) {
+    if (!entry || typeof entry !== "object" || typeof entry.id !== "string") {
+      continue;
+    }
+    const agentDocker = entry.sandbox?.docker;
+    if (agentDocker && typeof agentDocker === "object") {
+      configs.push({
+        source: `agents.entries.${entry.id}.sandbox.docker`,
+        docker: agentDocker as Record<string, unknown>,
+      });
+    }
+  }
 
-  if (weakMatches.size > 0) {
-    const lines = Array.from(weakMatches.values())
-      .slice(0, 12)
-      .map((m) => `- ${m.model} (${m.reasons.join("; ")}) @ ${m.source}`)
-      .join("\n");
-    const more = weakMatches.size > 12 ? `\n…${weakMatches.size - 12} more` : "";
-    findings.push({
-      checkId: "models.weak_tier",
-      severity: "warn",
-      title: "Some configured models are below recommended tiers",
-      detail:
-        "Smaller/older models are generally more susceptible to prompt injection and tool misuse.\n" +
-        lines +
-        more,
-      remediation:
-        "Use the latest, top-tier model for any bot with tools or untrusted inboxes. Avoid Haiku tiers; prefer GPT-5+ and Claude 4.5+.",
-    });
+  for (const { source, docker } of configs) {
+    const binds = Array.isArray(docker.binds) ? docker.binds : [];
+    for (const bind of binds) {
+      if (typeof bind !== "string") {
+        continue;
+      }
+      const blocked = getBlockedBindReason(bind);
+      if (!blocked) {
+        continue;
+      }
+      if (blocked.kind === "non_absolute") {
+        findings.push({
+          checkId: "sandbox.bind_mount_non_absolute",
+          severity: "warn",
+          title: "Sandbox bind mount uses a non-absolute source path",
+          detail:
+            `${source}.binds contains "${bind}" which uses source path "${blocked.sourcePath}". ` +
+            "Non-absolute bind sources are hard to validate safely and may resolve unexpectedly.",
+          remediation: `Rewrite "${bind}" to use an absolute host path (for example: /home/user/project:/project:ro).`,
+        });
+        continue;
+      }
+      if (blocked.kind !== "covers" && blocked.kind !== "targets") {
+        continue;
+      }
+      const verb = blocked.kind === "covers" ? "covers" : "targets";
+      findings.push({
+        checkId: "sandbox.dangerous_bind_mount",
+        severity: "critical",
+        title: "Dangerous bind mount in sandbox config",
+        detail:
+          `${source}.binds contains "${bind}" which ${verb} blocked path "${blocked.blockedPath}". ` +
+          "This can expose host system directories or the Docker socket to sandbox containers.",
+        remediation: `Remove "${bind}" from ${source}.binds. Use project-specific paths instead.`,
+      });
+    }
+
+    const network = typeof docker.network === "string" ? docker.network : undefined;
+    const normalizedNetwork = normalizeNetworkMode(network);
+    if (isDangerousNetworkMode(network)) {
+      const modeLabel = normalizedNetwork === "host" ? '"host"' : `"${network}"`;
+      const detail =
+        normalizedNetwork === "host"
+          ? `${source}.network is "host" which bypasses container network isolation entirely.`
+          : `${source}.network is ${modeLabel} which joins another container namespace and can bypass sandbox network isolation.`;
+      findings.push({
+        checkId: "sandbox.dangerous_network_mode",
+        severity: "critical",
+        title: "Dangerous network mode in sandbox config",
+        detail,
+        remediation:
+          `Set ${source}.network to "bridge", "none", or a custom bridge network name.` +
+          ` Use ${source}.dangerouslyAllowContainerNamespaceJoin=true only as a break-glass override when you fully trust this runtime.`,
+      });
+    }
+
+    const seccompProfile =
+      typeof docker.seccompProfile === "string" ? docker.seccompProfile : undefined;
+    if (normalizeOptionalLowercaseString(seccompProfile) === "unconfined") {
+      findings.push({
+        checkId: "sandbox.dangerous_seccomp_profile",
+        severity: "critical",
+        title: "Seccomp unconfined in sandbox config",
+        detail: `${source}.seccompProfile is "unconfined" which disables syscall filtering.`,
+        remediation: `Remove ${source}.seccompProfile or use a custom seccomp profile file.`,
+      });
+    }
+
+    const apparmorProfile =
+      typeof docker.apparmorProfile === "string" ? docker.apparmorProfile : undefined;
+    if (normalizeOptionalLowercaseString(apparmorProfile) === "unconfined") {
+      findings.push({
+        checkId: "sandbox.dangerous_apparmor_profile",
+        severity: "critical",
+        title: "AppArmor unconfined in sandbox config",
+        detail: `${source}.apparmorProfile is "unconfined" which disables AppArmor enforcement.`,
+        remediation: `Remove ${source}.apparmorProfile or use a named AppArmor profile.`,
+      });
+    }
   }
 
   return findings;
 }
 
-export function collectSmallModelRiskFindings(params: {
-  cfg: OpenClawConfig;
-  env: NodeJS.ProcessEnv;
-}): SecurityAuditFinding[] {
+export function collectNodeDenyCommandPatternFindings(cfg: OpenClawConfig): SecurityAuditFinding[] {
   const findings: SecurityAuditFinding[] = [];
-  const models = collectModels(params.cfg).filter((entry) => !entry.source.includes("imageModel"));
-  if (models.length === 0) {
+  const denyListRaw = cfg.gateway?.nodes?.commands?.deny;
+  if (!Array.isArray(denyListRaw) || denyListRaw.length === 0) {
     return findings;
   }
 
-  const smallModels = models
-    .map((entry) => {
-      const paramB = inferParamBFromIdOrName(entry.id);
-      if (!paramB || paramB > SMALL_MODEL_PARAM_B_MAX) {
-        return null;
-      }
-      return { ...entry, paramB };
-    })
-    .filter((entry): entry is { id: string; source: string; paramB: number } => Boolean(entry));
-
-  if (smallModels.length === 0) {
+  const denyList = denyListRaw.map(normalizeNodeCommand).filter(Boolean);
+  if (denyList.length === 0) {
     return findings;
   }
 
-  let hasUnsafe = false;
-  const modelLines: string[] = [];
-  const exposureSet = new Set<string>();
-  for (const entry of smallModels) {
-    const agentId = extractAgentIdFromSource(entry.source);
-    const sandboxMode = resolveSandboxConfigForAgent(params.cfg, agentId ?? undefined).mode;
-    const agentTools =
-      agentId && params.cfg.agents?.list
-        ? params.cfg.agents.list.find((agent) => agent?.id === agentId)?.tools
-        : undefined;
-    const policies = resolveToolPolicies({
-      cfg: params.cfg,
-      agentTools,
-      sandboxMode,
-      agentId,
-    });
-    const exposed: string[] = [];
-    if (isWebSearchEnabled(params.cfg, params.env)) {
-      if (isToolAllowedByPolicies("web_search", policies)) {
-        exposed.push("web_search");
-      }
-    }
-    if (isWebFetchEnabled(params.cfg)) {
-      if (isToolAllowedByPolicies("web_fetch", policies)) {
-        exposed.push("web_fetch");
-      }
-    }
-    if (isBrowserEnabled(params.cfg)) {
-      if (isToolAllowedByPolicies("browser", policies)) {
-        exposed.push("browser");
-      }
-    }
-    for (const tool of exposed) {
-      exposureSet.add(tool);
-    }
-    const sandboxLabel = sandboxMode === "all" ? "sandbox=all" : `sandbox=${sandboxMode}`;
-    const exposureLabel = exposed.length > 0 ? ` web=[${exposed.join(", ")}]` : " web=[off]";
-    const safe = sandboxMode === "all" && exposed.length === 0;
-    if (!safe) {
-      hasUnsafe = true;
-    }
-    const statusLabel = safe ? "ok" : "unsafe";
-    modelLines.push(
-      `- ${entry.id} (${entry.paramB}B) @ ${entry.source} (${statusLabel}; ${sandboxLabel};${exposureLabel})`,
+  const knownCommands = listKnownNodeCommands(cfg);
+  const patternLike = denyList.filter((entry) => looksLikeNodeCommandPattern(entry));
+  const unknownExact = denyList.filter(
+    (entry) => !looksLikeNodeCommandPattern(entry) && !knownCommands.has(entry),
+  );
+  if (patternLike.length === 0 && unknownExact.length === 0) {
+    return findings;
+  }
+
+  const detailParts: string[] = [];
+  if (patternLike.length > 0) {
+    detailParts.push(
+      `Pattern-like entries (not supported by exact matching): ${patternLike.join(", ")}`,
     );
   }
+  if (unknownExact.length > 0) {
+    const unknownDetails = unknownExact
+      .map((entry) => {
+        const suggestions = suggestKnownNodeCommands(entry, knownCommands);
+        if (suggestions.length === 0) {
+          return entry;
+        }
+        return `${entry} (did you mean: ${suggestions.join(", ")})`;
+      })
+      .join(", ");
 
-  const exposureList = Array.from(exposureSet);
-  const exposureDetail =
-    exposureList.length > 0
-      ? `Uncontrolled input tools allowed: ${exposureList.join(", ")}.`
-      : "No web/browser tools detected for these models.";
+    detailParts.push(
+      `Unknown command names (not in defaults/gateway.nodes.commands.allow): ${unknownDetails}`,
+    );
+  }
+  const examples = Array.from(knownCommands).slice(0, 8);
 
   findings.push({
-    checkId: "models.small_params",
-    severity: hasUnsafe ? "critical" : "info",
-    title: "Small models require sandboxing and web tools disabled",
+    checkId: "gateway.nodes.deny_commands_ineffective",
+    severity: "warn",
+    title: "Some gateway.nodes.commands.deny entries are ineffective",
     detail:
-      `Small models (<=${SMALL_MODEL_PARAM_B_MAX}B params) detected:\n` +
-      modelLines.join("\n") +
-      `\n` +
-      exposureDetail +
-      `\n` +
-      "Small models are not recommended for untrusted inputs.",
+      "gateway.nodes.commands.deny uses exact node command-name matching only (for example `system.run`), not shell-text filtering inside a command payload.\n" +
+      detailParts.map((entry) => `- ${entry}`).join("\n"),
     remediation:
-      'If you must use small models, enable sandboxing for all sessions (agents.defaults.sandbox.mode="all") and disable web_search/web_fetch/browser (tools.deny=["group:web","browser"]).',
+      `Use exact command names (for example: ${examples.join(", ")}). ` +
+      "If you need broader restrictions, remove risky command IDs from gateway.nodes.commands.allow/default workflows and tighten tools.exec policy.",
+  });
+
+  return findings;
+}
+
+export function collectNodeDangerousAllowCommandFindings(
+  cfg: OpenClawConfig,
+): SecurityAuditFinding[] {
+  const findings: SecurityAuditFinding[] = [];
+  const allowRaw = cfg.gateway?.nodes?.commands?.allow;
+  if (!Array.isArray(allowRaw) || allowRaw.length === 0) {
+    return findings;
+  }
+
+  const allow = new Set(allowRaw.map(normalizeNodeCommand).filter(Boolean));
+  if (allow.size === 0) {
+    return findings;
+  }
+
+  const deny = new Set((cfg.gateway?.nodes?.commands?.deny ?? []).map(normalizeNodeCommand));
+  const dangerousAllowed = [
+    ...DEFAULT_DANGEROUS_NODE_COMMANDS,
+    ...listDangerousPluginNodeCommands(),
+  ].filter((cmd) => allow.has(cmd) && !deny.has(cmd));
+  if (dangerousAllowed.length === 0) {
+    return findings;
+  }
+
+  findings.push({
+    checkId: "gateway.nodes.allow_commands_dangerous",
+    severity: isGatewayRemotelyExposed(cfg) ? "critical" : "warn",
+    title: "Dangerous node commands explicitly enabled",
+    detail:
+      `gateway.nodes.commands.allow includes: ${dangerousAllowed.join(", ")}. ` +
+      "These commands can trigger high-impact device actions or read sensitive data (desktop input/camera/screen/contacts/calendar/reminders/health/SMS/file).",
+    remediation:
+      "Remove these entries from gateway.nodes.commands.allow (recommended). " +
+      "If you keep them, treat gateway auth as full operator access and keep gateway exposure local/tailnet-only.",
+  });
+
+  return findings;
+}
+
+export function collectMinimalProfileOverrideFindings(cfg: OpenClawConfig): SecurityAuditFinding[] {
+  const findings: SecurityAuditFinding[] = [];
+  if (cfg.tools?.profile !== "minimal") {
+    return findings;
+  }
+
+  const overrides = listAgentEntries(cfg)
+    .filter((entry): entry is { id: string; tools?: AgentToolsConfig } => {
+      return Boolean(
+        entry &&
+        typeof entry === "object" &&
+        typeof entry.id === "string" &&
+        entry.tools?.profile &&
+        entry.tools.profile !== "minimal",
+      );
+    })
+    .map((entry) => `${entry.id}=${entry.tools?.profile}`);
+
+  if (overrides.length === 0) {
+    return findings;
+  }
+
+  findings.push({
+    checkId: "tools.profile_minimal_overridden",
+    severity: "warn",
+    title: "Global tools.profile=minimal is overridden by agent profiles",
+    detail:
+      "Global minimal profile is set, but these agent profiles take precedence:\n" +
+      overrides.map((entry) => `- agents.entries.${entry}`).join("\n"),
+    remediation:
+      'Set those agents to `tools.profile="minimal"` (or remove the agent override) if you want minimal tools enforced globally.',
   });
 
   return findings;
@@ -650,8 +925,8 @@ export function collectSmallModelRiskFindings(params: {
 
 export function collectExposureMatrixFindings(cfg: OpenClawConfig): SecurityAuditFinding[] {
   const findings: SecurityAuditFinding[] = [];
-  const openGroups = listGroupPolicyOpen(cfg);
-  if (openGroups.length === 0) {
+  const openInboundPolicies = listOpenInboundPolicies(cfg);
+  if (openInboundPolicies.length === 0) {
     return findings;
   }
 
@@ -660,13 +935,102 @@ export function collectExposureMatrixFindings(cfg: OpenClawConfig): SecurityAudi
     findings.push({
       checkId: "security.exposure.open_groups_with_elevated",
       severity: "critical",
-      title: "Open groupPolicy with elevated tools enabled",
+      title: "Open group/DM policy with elevated tools enabled",
       detail:
-        `Found groupPolicy="open" at:\n${openGroups.map((p) => `- ${p}`).join("\n")}\n` +
-        "With tools.elevated enabled, a prompt injection in those rooms can become a high-impact incident.",
-      remediation: `Set groupPolicy="allowlist" and keep elevated allowlists extremely tight.`,
+        `Found inbound policy="open" at:\n${openInboundPolicies.map((p) => `- ${p}`).join("\n")}\n` +
+        "With tools.elevated enabled, a prompt injection in those conversations can become a high-impact incident.",
+      remediation:
+        'Set each listed group/DM policy to "allowlist" and keep elevated allowlists extremely tight.',
+    });
+  }
+
+  const { riskyContexts, hasRuntimeRisk } = collectRiskyToolExposureContexts(cfg);
+
+  if (riskyContexts.length > 0) {
+    findings.push({
+      checkId: "security.exposure.open_groups_with_runtime_or_fs",
+      severity: hasRuntimeRisk ? "critical" : "warn",
+      title: "Open group/DM policy with runtime/filesystem tools exposed",
+      detail:
+        `Found inbound policy="open" at:\n${openInboundPolicies.map((p) => `- ${p}`).join("\n")}\n` +
+        `Risky tool exposure contexts:\n${riskyContexts.map((line) => `- ${line}`).join("\n")}\n` +
+        "Prompt injection in open conversations can trigger command/file actions in these contexts.",
+      remediation:
+        'For open groups or DMs, prefer tools.profile="messaging" (or deny group:runtime/group:fs), set tools.fs.workspaceOnly=true, and use agents.defaults.sandbox.mode="all" for exposed agents.',
+    });
+  }
+
+  const controlPlaneContexts = collectControlPlaneToolExposureContexts(cfg);
+  if (controlPlaneContexts.length > 0) {
+    findings.push({
+      checkId: "security.exposure.open_groups_with_control_plane_tools",
+      severity: "critical",
+      title: "Open group/DM policy with control-plane tools exposed",
+      detail:
+        `Found inbound policy="open" at:\n${openInboundPolicies.map((p) => `- ${p}`).join("\n")}\n` +
+        `Control-plane tool exposure contexts:\n${controlPlaneContexts.map((line) => `- ${line}`).join("\n")}\n` +
+        "Prompt injection in open conversations can trigger OpenClaw updates, plugin changes, or scheduled automation.",
+      remediation: `For open groups or DMs, deny control-plane tools (${GATEWAY_CONTROL_PLANE_TOOLS.map((tool) => `\`${tool}\``).join(", ")}) and prefer tools.profile="messaging". Tighten dmPolicy/groupPolicy to pairing or allowlist when possible.`,
     });
   }
 
   return findings;
 }
+
+export function collectLikelyMultiUserSetupFindings(cfg: OpenClawConfig): SecurityAuditFinding[] {
+  const findings: SecurityAuditFinding[] = [];
+  const mainGroupScopes = listEffectiveGroupRouteBindings(cfg)
+    .filter((binding) => binding.session?.groupScope === "main")
+    .map(
+      (binding) =>
+        `- bindings[].session.groupScope="main": ${describeBinding(binding)} (agent=${binding.agentId})`,
+    );
+  if (cfg.session?.groupScope === "main") {
+    mainGroupScopes.unshift(
+      '- session.groupScope="main" (global: all group/channel rooms unless a binding overrides it)',
+    );
+  }
+  if (mainGroupScopes.length > 0) {
+    findings.push({
+      checkId: "security.trust_model.group_scope_main",
+      severity: "warn",
+      title: "Group rooms share the main session",
+      detail:
+        "The following group routing scopes merge room conversations into the agent main session:\n" +
+        mainGroupScopes.join("\n") +
+        "\nEvery member of each affected room shares the main-session context. Use this only for mutually trusted rooms.",
+      remediation:
+        'Use session.groupScope="per-group" globally and remove binding overrides, or reserve "main" for rooms whose members you trust: https://docs.openclaw.ai/channels/groups#session-keys',
+    });
+  }
+
+  const signals = listPotentialMultiUserSignals(cfg);
+  if (signals.length === 0) {
+    return findings;
+  }
+
+  const { riskyContexts, hasRuntimeRisk } = collectRiskyToolExposureContexts(cfg);
+  const impactLine = hasRuntimeRisk
+    ? "Runtime/process tools are exposed without full sandboxing in at least one context."
+    : "No unguarded runtime/process tools were detected by this heuristic.";
+  const riskyContextsDetail =
+    riskyContexts.length > 0
+      ? `Potential high-impact tool exposure contexts:\n${riskyContexts.map((line) => `- ${line}`).join("\n")}`
+      : "No unguarded runtime/filesystem contexts detected.";
+
+  findings.push({
+    checkId: "security.trust_model.multi_user_heuristic",
+    severity: "warn",
+    title: "Potential multi-user setup detected (personal-assistant model warning)",
+    detail:
+      "Heuristic signals indicate this gateway may be reachable by multiple users:\n" +
+      signals.map((signal) => `- ${signal}`).join("\n") +
+      `\n${impactLine}\n${riskyContextsDetail}\n` +
+      "OpenClaw's default security model is personal-assistant (one trusted operator boundary), not hostile multi-tenant isolation on one shared gateway. For mutually untrusted users or organizations, run separate Gateways with separate credentials, ideally under separate OS users or hosts: https://docs.openclaw.ai/gateway/security/trust-model",
+    remediation:
+      'If users may be mutually untrusted, split trust boundaries (separate gateways + credentials, ideally separate OS users/hosts). If you intentionally run shared-user access, set agents.defaults.sandbox.mode="all", keep tools.fs.workspaceOnly=true, deny runtime/fs/web tools unless required, and keep personal/private identities + credentials off that runtime.',
+  });
+
+  return findings;
+}
+/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

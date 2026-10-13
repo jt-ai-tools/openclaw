@@ -1,99 +1,52 @@
-import type { OpenClawConfig, PluginRuntime } from "openclaw/plugin-sdk";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { linePlugin } from "./channel.js";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { createPluginRuntimeMock } from "openclaw/plugin-sdk/channel-test-helpers";
+import { createRuntimeEnv } from "openclaw/plugin-sdk/plugin-test-runtime";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { OpenClawConfig } from "../api.js";
+import { resolveLineAccount } from "./accounts.js";
+import { lineGatewayAdapter } from "./gateway.js";
 import { setLineRuntime } from "./runtime.js";
 
-const DEFAULT_ACCOUNT_ID = "default";
-
-type LineRuntimeMocks = {
-  writeConfigFile: ReturnType<typeof vi.fn>;
-  resolveLineAccount: ReturnType<typeof vi.fn>;
-};
-
-function createRuntime(): { runtime: PluginRuntime; mocks: LineRuntimeMocks } {
-  const writeConfigFile = vi.fn(async () => {});
-  const resolveLineAccount = vi.fn(
-    ({ cfg, accountId }: { cfg: OpenClawConfig; accountId?: string }) => {
-      const lineConfig = (cfg.channels?.line ?? {}) as {
-        tokenFile?: string;
-        secretFile?: string;
-        channelAccessToken?: string;
-        channelSecret?: string;
-        accounts?: Record<string, Record<string, unknown>>;
-      };
-      const entry =
-        accountId && accountId !== DEFAULT_ACCOUNT_ID
-          ? (lineConfig.accounts?.[accountId] ?? {})
-          : lineConfig;
-      const hasToken =
-        // oxlint-disable-next-line typescript/no-explicit-any
-        Boolean((entry as any).channelAccessToken) || Boolean((entry as any).tokenFile);
-      // oxlint-disable-next-line typescript/no-explicit-any
-      const hasSecret = Boolean((entry as any).channelSecret) || Boolean((entry as any).secretFile);
-      return { tokenSource: hasToken && hasSecret ? "config" : "none" };
-    },
-  );
-
-  const runtime = {
-    config: { writeConfigFile },
-    channel: { line: { resolveLineAccount } },
-  } as unknown as PluginRuntime;
-
-  return { runtime, mocks: { writeConfigFile, resolveLineAccount } };
+let tempDir: string;
+async function logout(cfg: OpenClawConfig, accountId = "default") {
+  const original = structuredClone(cfg);
+  const runtime = createPluginRuntimeMock();
+  setLineRuntime(runtime);
+  const result = await lineGatewayAdapter.logoutAccount!({
+    accountId,
+    cfg,
+    account: resolveLineAccount({ cfg, accountId }),
+    runtime: createRuntimeEnv(),
+  });
+  expect(cfg).toEqual(original);
+  return { result, replace: vi.mocked(runtime.config.replaceConfigFile) };
 }
 
-describe("linePlugin gateway.logoutAccount", () => {
-  beforeEach(() => {
-    setLineRuntime(createRuntime().runtime);
+describe("LINE account logout", () => {
+  beforeEach(async () => {
+    vi.stubEnv("LINE_CHANNEL_ACCESS_TOKEN", "");
+    vi.stubEnv("LINE_CHANNEL_SECRET", "");
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-line-logout-"));
+  });
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await fs.rm(tempDir, { recursive: true, force: true });
   });
 
-  it("clears tokenFile/secretFile on default account logout", async () => {
-    const { runtime, mocks } = createRuntime();
-    setLineRuntime(runtime);
-
-    const cfg: OpenClawConfig = {
+  it("clears default file credentials and prunes the empty channel", async () => {
+    const { result, replace } = await logout({
       channels: {
         line: {
-          tokenFile: "/tmp/token",
-          secretFile: "/tmp/secret",
+          channelAccessToken: "",
+          channelSecret: "",
+          tokenFile: path.join(tempDir, "token"),
+          secretFile: path.join(tempDir, "secret"),
         },
       },
-    };
-
-    const result = await linePlugin.gateway.logoutAccount({
-      accountId: DEFAULT_ACCOUNT_ID,
-      cfg,
     });
-
-    expect(result.cleared).toBe(true);
-    expect(result.loggedOut).toBe(true);
-    expect(mocks.writeConfigFile).toHaveBeenCalledWith({});
-  });
-
-  it("clears tokenFile/secretFile on account logout", async () => {
-    const { runtime, mocks } = createRuntime();
-    setLineRuntime(runtime);
-
-    const cfg: OpenClawConfig = {
-      channels: {
-        line: {
-          accounts: {
-            primary: {
-              tokenFile: "/tmp/token",
-              secretFile: "/tmp/secret",
-            },
-          },
-        },
-      },
-    };
-
-    const result = await linePlugin.gateway.logoutAccount({
-      accountId: "primary",
-      cfg,
-    });
-
-    expect(result.cleared).toBe(true);
-    expect(result.loggedOut).toBe(true);
-    expect(mocks.writeConfigFile).toHaveBeenCalledWith({});
+    expect(result).toEqual({ cleared: true, envToken: false, loggedOut: true });
+    expect(replace).toHaveBeenCalledWith({ nextConfig: {}, afterWrite: { mode: "auto" } });
   });
 });

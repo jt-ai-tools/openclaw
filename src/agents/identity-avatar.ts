@@ -1,102 +1,92 @@
-import fs from "node:fs";
+/**
+ * Resolves public avatar sources for configured agent identities.
+ */
 import path from "node:path";
-import type { OpenClawConfig } from "../config/config.js";
-import { resolveUserPath } from "../utils.js";
+import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
+import {
+  hasAvatarUriScheme,
+  isAvatarDataUrl,
+  isAvatarHttpUrl,
+  isWindowsAbsolutePath,
+} from "../shared/avatar-policy.js";
 import { resolveAgentWorkspaceDir } from "./agent-scope.js";
+import { resolveLocalAgentAvatarPath } from "./identity-avatar-file.js";
 import { loadAgentIdentityFromWorkspace } from "./identity-file.js";
 import { resolveAgentIdentity } from "./identity.js";
 
 export type AgentAvatarResolution =
-  | { kind: "none"; reason: string }
-  | { kind: "local"; filePath: string }
-  | { kind: "remote"; url: string }
-  | { kind: "data"; url: string };
+  | { kind: "none"; reason: string; source?: string }
+  | { kind: "local"; filePath: string; source: string }
+  | { kind: "remote"; url: string; source: string }
+  | { kind: "data"; url: string; source: string };
 
-const ALLOWED_AVATAR_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"]);
+type AgentAvatarPublicSourceInput = {
+  kind: AgentAvatarResolution["kind"];
+  source?: string | null;
+};
 
-function normalizeAvatarValue(value: string | undefined | null): string | null {
-  const trimmed = value?.trim();
-  return trimmed ? trimmed : null;
-}
+const PUBLIC_AVATAR_SOURCE_MAX_CHARS = 256;
+const PUBLIC_DATA_AVATAR_HEADER_MAX_CHARS = 64;
 
-function resolveAvatarSource(cfg: OpenClawConfig, agentId: string): string | null {
-  const fromConfig = normalizeAvatarValue(resolveAgentIdentity(cfg, agentId)?.avatar);
-  if (fromConfig) {
-    return fromConfig;
+function isSafeRelativeAvatarSource(source: string): boolean {
+  if (
+    source.length > PUBLIC_AVATAR_SOURCE_MAX_CHARS ||
+    source.startsWith("~") ||
+    path.isAbsolute(source) ||
+    isWindowsAbsolutePath(source) ||
+    hasAvatarUriScheme(source) ||
+    source.includes("\0")
+  ) {
+    return false;
   }
-  const workspace = resolveAgentWorkspaceDir(cfg, agentId);
-  const fromIdentity = normalizeAvatarValue(loadAgentIdentityFromWorkspace(workspace)?.avatar);
-  return fromIdentity;
+  const parts = source.replace(/\\/g, "/").split("/");
+  return parts.every((part) => part !== "..");
 }
 
-function isRemoteAvatar(value: string): boolean {
-  const lower = value.toLowerCase();
-  return lower.startsWith("http://") || lower.startsWith("https://");
-}
-
-function isDataAvatar(value: string): boolean {
-  return value.toLowerCase().startsWith("data:");
-}
-
-function resolveExistingPath(value: string): string {
-  try {
-    return fs.realpathSync(value);
-  } catch {
-    return path.resolve(value);
+/** Return a safe public description of the configured avatar source. */
+export function resolvePublicAgentAvatarSource(
+  resolved: AgentAvatarPublicSourceInput,
+): string | undefined {
+  const source = normalizeOptionalString(resolved.source) ?? null;
+  if (!source) {
+    return undefined;
   }
+  if (isAvatarDataUrl(source)) {
+    // Data URLs can be large and sensitive; expose only the media/header prefix.
+    const commaIndex = source.indexOf(",");
+    const header =
+      commaIndex > 0
+        ? source.slice(0, Math.min(commaIndex, PUBLIC_DATA_AVATAR_HEADER_MAX_CHARS))
+        : source.slice(0, PUBLIC_DATA_AVATAR_HEADER_MAX_CHARS);
+    return `${header},...`;
+  }
+  if (isAvatarHttpUrl(source)) {
+    return "remote URL";
+  }
+  return isSafeRelativeAvatarSource(source) ? source : undefined;
 }
 
-function isPathWithin(root: string, target: string): boolean {
-  const relative = path.relative(root, target);
-  if (!relative) {
-    return true;
-  }
-  return !relative.startsWith("..") && !path.isAbsolute(relative);
-}
-
-function resolveLocalAvatarPath(params: {
-  raw: string;
-  workspaceDir: string;
-}): { ok: true; filePath: string } | { ok: false; reason: string } {
-  const workspaceRoot = resolveExistingPath(params.workspaceDir);
-  const raw = params.raw;
-  const resolved =
-    raw.startsWith("~") || path.isAbsolute(raw)
-      ? resolveUserPath(raw)
-      : path.resolve(workspaceRoot, raw);
-  const realPath = resolveExistingPath(resolved);
-  if (!isPathWithin(workspaceRoot, realPath)) {
-    return { ok: false, reason: "outside_workspace" };
-  }
-  const ext = path.extname(realPath).toLowerCase();
-  if (!ALLOWED_AVATAR_EXTS.has(ext)) {
-    return { ok: false, reason: "unsupported_extension" };
-  }
-  try {
-    if (!fs.statSync(realPath).isFile()) {
-      return { ok: false, reason: "missing" };
-    }
-  } catch {
-    return { ok: false, reason: "missing" };
-  }
-  return { ok: true, filePath: realPath };
-}
-
+/** Resolve the effective avatar for an agent, including config and IDENTITY.md. */
 export function resolveAgentAvatar(cfg: OpenClawConfig, agentId: string): AgentAvatarResolution {
-  const source = resolveAvatarSource(cfg, agentId);
+  const source =
+    normalizeOptionalString(resolveAgentIdentity(cfg, agentId)?.avatar) ??
+    normalizeOptionalString(
+      loadAgentIdentityFromWorkspace(resolveAgentWorkspaceDir(cfg, agentId))?.avatar,
+    );
   if (!source) {
     return { kind: "none", reason: "missing" };
   }
-  if (isRemoteAvatar(source)) {
-    return { kind: "remote", url: source };
+  if (isAvatarHttpUrl(source)) {
+    return { kind: "remote", url: source, source };
   }
-  if (isDataAvatar(source)) {
-    return { kind: "data", url: source };
+  if (isAvatarDataUrl(source)) {
+    return { kind: "data", url: source, source };
   }
   const workspaceDir = resolveAgentWorkspaceDir(cfg, agentId);
-  const resolved = resolveLocalAvatarPath({ raw: source, workspaceDir });
+  const resolved = resolveLocalAgentAvatarPath({ raw: source, workspaceDir });
   if (!resolved.ok) {
-    return { kind: "none", reason: resolved.reason };
+    return { kind: "none", reason: resolved.reason, source };
   }
-  return { kind: "local", filePath: resolved.filePath };
+  return { kind: "local", filePath: resolved.value.filePath, source };
 }

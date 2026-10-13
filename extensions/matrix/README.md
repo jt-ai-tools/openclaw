@@ -1,12 +1,11 @@
-# matrix 目錄索引
+# OpenClaw Matrix
 
-### 文件
+Official OpenClaw channel plugin for Matrix rooms and direct messages.
 
-| 檔案名稱 | 連結 |
-| :--- | :--- |
-| CHANGELOG.md | [CHANGELOG.md](CHANGELOG.md) |
-| CHANGELOG_zh_TW.md | [CHANGELOG_zh_TW.md](CHANGELOG_zh_TW.md) |
+Install from OpenClaw:
 
-### 子目錄
+```bash
+openclaw plugins install @openclaw/matrix
+```
 
-- [src](src/README.md)
+Configure the Matrix homeserver and bot credentials in OpenClaw. The plugin lets agents join configured rooms, receive messages, and reply through Matrix.

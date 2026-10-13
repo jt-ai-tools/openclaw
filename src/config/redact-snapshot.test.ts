@@ -1,389 +1,626 @@
+import { expectDefined } from "@openclaw/normalization-core";
 import { describe, expect, it } from "vitest";
-import type { ConfigFileSnapshot } from "./types.openclaw.js";
+import { redactSnapshotTestHints as mainSchemaHints } from "../../test/helpers/config/redact-snapshot-test-hints.js";
+import { createWarnLogCapture } from "../logging/test-helpers/warn-log-capture.js";
+import type { ConfigUiHints } from "../shared/config-ui-hints-types.js";
+import { materializeRuntimeConfig } from "./materialize.js";
 import {
   REDACTED_SENTINEL,
   redactConfigSnapshot,
-  restoreRedactedValues,
+  restoreRedactedValues as restoreRedactedValues_orig,
 } from "./redact-snapshot.js";
-
-function makeSnapshot(config: Record<string, unknown>, raw?: string): ConfigFileSnapshot {
-  return {
-    path: "/home/user/.openclaw/config.json5",
-    exists: true,
-    raw: raw ?? JSON.stringify(config),
-    parsed: config,
-    valid: true,
-    config: config as ConfigFileSnapshot["config"],
-    hash: "abc123",
-    issues: [],
-    warnings: [],
-    legacyIssues: [],
-  };
-}
+import { replaceSensitiveValuesInRaw } from "./redact-snapshot.raw.js";
+import { makeSnapshot, restoreRedactedValues } from "./redact-snapshot.test-helpers.js";
+import { buildConfigSchemaCore } from "./schema.js";
+import type { OpenClawConfig } from "./types.openclaw.js";
 
 describe("redactConfigSnapshot", () => {
-  it("redacts top-level token fields", () => {
-    const snapshot = makeSnapshot({
-      gateway: { auth: { token: "my-super-secret-gateway-token-value" } },
-    });
-    const result = redactConfigSnapshot(snapshot);
-    expect(result.config).toEqual({
-      gateway: { auth: { token: REDACTED_SENTINEL } },
-    });
-  });
-
-  it("redacts botToken in channel configs", () => {
-    const snapshot = makeSnapshot({
-      channels: {
-        telegram: { botToken: "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef" },
-        slack: { botToken: "fake-slack-bot-token-placeholder-value" },
-      },
-    });
-    const result = redactConfigSnapshot(snapshot);
-    const channels = result.config.channels as Record<string, Record<string, string>>;
-    expect(channels.telegram.botToken).toBe(REDACTED_SENTINEL);
-    expect(channels.slack.botToken).toBe(REDACTED_SENTINEL);
-  });
-
-  it("redacts apiKey in model providers", () => {
-    const snapshot = makeSnapshot({
-      models: {
-        providers: {
-          openai: { apiKey: "sk-proj-abcdef1234567890ghij", baseUrl: "https://api.openai.com" },
-        },
-      },
-    });
-    const result = redactConfigSnapshot(snapshot);
-    const models = result.config.models as Record<string, Record<string, Record<string, string>>>;
-    expect(models.providers.openai.apiKey).toBe(REDACTED_SENTINEL);
-    expect(models.providers.openai.baseUrl).toBe("https://api.openai.com");
-  });
-
-  it("redacts password fields", () => {
-    const snapshot = makeSnapshot({
-      gateway: { auth: { password: "super-secret-password-value-here" } },
-    });
-    const result = redactConfigSnapshot(snapshot);
-    const gw = result.config.gateway as Record<string, Record<string, string>>;
-    expect(gw.auth.password).toBe(REDACTED_SENTINEL);
-  });
-
-  it("redacts appSecret fields", () => {
-    const snapshot = makeSnapshot({
-      channels: {
-        feishu: { appSecret: "feishu-app-secret-value-here-1234" },
-      },
-    });
-    const result = redactConfigSnapshot(snapshot);
-    const channels = result.config.channels as Record<string, Record<string, string>>;
-    expect(channels.feishu.appSecret).toBe(REDACTED_SENTINEL);
-  });
-
-  it("redacts signingSecret fields", () => {
-    const snapshot = makeSnapshot({
-      channels: {
-        slack: { signingSecret: "slack-signing-secret-value-1234" },
-      },
-    });
-    const result = redactConfigSnapshot(snapshot);
-    const channels = result.config.channels as Record<string, Record<string, string>>;
-    expect(channels.slack.signingSecret).toBe(REDACTED_SENTINEL);
-  });
-
-  it("redacts short secrets with same sentinel", () => {
-    const snapshot = makeSnapshot({
-      gateway: { auth: { token: "short" } },
-    });
-    const result = redactConfigSnapshot(snapshot);
-    const gw = result.config.gateway as Record<string, Record<string, string>>;
-    expect(gw.auth.token).toBe(REDACTED_SENTINEL);
-  });
-
-  it("preserves non-sensitive fields", () => {
-    const snapshot = makeSnapshot({
-      ui: { seamColor: "#0088cc" },
-      gateway: { port: 18789 },
-      models: { providers: { openai: { baseUrl: "https://api.openai.com" } } },
-    });
-    const result = redactConfigSnapshot(snapshot);
-    expect(result.config).toEqual(snapshot.config);
-  });
-
-  it("does not redact maxTokens-style fields", () => {
-    const snapshot = makeSnapshot({
-      maxTokens: 16384,
-      models: {
-        providers: {
-          openai: {
-            models: [
-              {
-                id: "gpt-5",
-                maxTokens: 65536,
-                contextTokens: 200000,
-                maxTokensField: "max_completion_tokens",
-              },
-            ],
-            apiKey: "sk-proj-abcdef1234567890ghij",
-            accessToken: "access-token-value-1234567890",
-            maxTokens: 8192,
-            maxOutputTokens: 4096,
-            maxCompletionTokens: 2048,
-            contextTokens: 128000,
-            tokenCount: 500,
-            tokenLimit: 100000,
-            tokenBudget: 50000,
-          },
-        },
-      },
-      gateway: { auth: { token: "secret-gateway-token-value" } },
-    });
-
-    const result = redactConfigSnapshot(snapshot);
-    expect((result.config as Record<string, unknown>).maxTokens).toBe(16384);
-    const models = result.config.models as Record<string, unknown>;
-    const providerList = ((
-      (models.providers as Record<string, unknown>).openai as Record<string, unknown>
-    ).models ?? []) as Array<Record<string, unknown>>;
-    expect(providerList[0]?.maxTokens).toBe(65536);
-    expect(providerList[0]?.contextTokens).toBe(200000);
-    expect(providerList[0]?.maxTokensField).toBe("max_completion_tokens");
-
-    const providers = (models.providers as Record<string, Record<string, unknown>>) ?? {};
-    expect(providers.openai.apiKey).toBe(REDACTED_SENTINEL);
-    expect(providers.openai.accessToken).toBe(REDACTED_SENTINEL);
-    expect(providers.openai.maxTokens).toBe(8192);
-    expect(providers.openai.maxOutputTokens).toBe(4096);
-    expect(providers.openai.maxCompletionTokens).toBe(2048);
-    expect(providers.openai.contextTokens).toBe(128000);
-    expect(providers.openai.tokenCount).toBe(500);
-    expect(providers.openai.tokenLimit).toBe(100000);
-    expect(providers.openai.tokenBudget).toBe(50000);
-
-    const gw = result.config.gateway as Record<string, Record<string, string>>;
-    expect(gw.auth.token).toBe(REDACTED_SENTINEL);
-  });
-
-  it("preserves hash unchanged", () => {
-    const snapshot = makeSnapshot({ gateway: { auth: { token: "secret-token-value-here" } } });
-    const result = redactConfigSnapshot(snapshot);
-    expect(result.hash).toBe("abc123");
-  });
-
-  it("redacts secrets in raw field via text-based redaction", () => {
-    const config = { token: "abcdef1234567890ghij" };
-    const raw = '{ "token": "abcdef1234567890ghij" }';
-    const snapshot = makeSnapshot(config, raw);
-    const result = redactConfigSnapshot(snapshot);
-    expect(result.raw).not.toContain("abcdef1234567890ghij");
-    expect(result.raw).toContain(REDACTED_SENTINEL);
-  });
-
-  it("redacts parsed object as well", () => {
+  it("redacts whole serviceAccount objects without schema hints", () => {
     const config = {
-      channels: { discord: { token: "MTIzNDU2Nzg5MDEyMzQ1Njc4.GaBcDe.FgH" } },
-    };
-    const snapshot = makeSnapshot(config);
-    const result = redactConfigSnapshot(snapshot);
-    const parsed = result.parsed as Record<string, Record<string, Record<string, string>>>;
-    expect(parsed.channels.discord.token).toBe(REDACTED_SENTINEL);
-  });
-
-  it("handles null raw gracefully", () => {
-    const snapshot: ConfigFileSnapshot = {
-      path: "/test",
-      exists: false,
-      raw: null,
-      parsed: null,
-      valid: false,
-      config: {} as ConfigFileSnapshot["config"],
-      issues: [],
-      warnings: [],
-      legacyIssues: [],
-    };
-    const result = redactConfigSnapshot(snapshot);
-    expect(result.raw).toBeNull();
-    expect(result.parsed).toBeNull();
-  });
-
-  it("handles deeply nested tokens in accounts", () => {
-    const snapshot = makeSnapshot({
       channels: {
-        slack: {
-          accounts: {
-            workspace1: { botToken: "fake-workspace1-token-abcdefghij" },
-            workspace2: { appToken: "fake-workspace2-token-abcdefghij" },
+        googlechat: {
+          serviceAccount: {
+            type: "service_account",
+            client_email: "bot@example.test",
+            private_key: "synthetic-private-key",
+          },
+        },
+      },
+    };
+    const result = redactConfigSnapshot(makeSnapshot(config));
+    expect(result.config).toEqual({
+      channels: { googlechat: { serviceAccount: REDACTED_SENTINEL } },
+    });
+    expect(restoreRedactedValues(result.config, config)).toEqual(config);
+  });
+
+  it("redacts every string in an apiKey object without schema hints", () => {
+    const config = {
+      models: {
+        providers: {
+          example: {
+            apiKey: { source: "env", provider: "default", id: "EXAMPLE_API_KEY" },
+          },
+        },
+      },
+    };
+    expect(redactConfigSnapshot(makeSnapshot(config)).config).toEqual({
+      models: {
+        providers: {
+          example: {
+            apiKey: {
+              source: REDACTED_SENTINEL,
+              provider: REDACTED_SENTINEL,
+              id: REDACTED_SENTINEL,
+            },
           },
         },
       },
     });
-    const result = redactConfigSnapshot(snapshot);
-    const channels = result.config.channels as Record<
-      string,
-      Record<string, Record<string, Record<string, string>>>
-    >;
-    expect(channels.slack.accounts.workspace1.botToken).toBe(REDACTED_SENTINEL);
-    expect(channels.slack.accounts.workspace2.appToken).toBe(REDACTED_SENTINEL);
   });
 
-  it("handles webhookSecret field", () => {
-    const snapshot = makeSnapshot({
-      channels: {
-        telegram: { webhookSecret: "telegram-webhook-secret-value-1234" },
+  it("redacts and restores MCP headers while leaving blank and env-backed values editable", () => {
+    const hints = buildConfigSchemaCore().uiHints;
+    const editable = {
+      enabled: false,
+      url: "http://127.0.0.1:19999/mcp",
+      headers: { "X-Empty": "", "X-Blank": "   ", "X-Env": "${MCP_HEADER}" },
+    };
+    const protectedServer = {
+      ...editable,
+      headers: { Authorization: "synthetic-header-value", "X-Test": "ok" },
+    };
+    const config = { mcp: { servers: { editable, protected: protectedServer } } };
+    const result = redactConfigSnapshot(makeSnapshot(config), hints);
+    const expected = {
+      mcp: {
+        servers: {
+          editable,
+          protected: {
+            ...protectedServer,
+            headers: { Authorization: REDACTED_SENTINEL, "X-Test": REDACTED_SENTINEL },
+          },
+        },
       },
+    };
+    for (const projection of [
+      result.config,
+      result.parsed,
+      result.sourceConfig,
+      result.resolved,
+      result.runtimeConfig,
+    ]) {
+      expect(projection).toEqual(expected);
+    }
+    expect(result.raw).toBe(JSON.stringify(expected));
+    expect(restoreRedactedValues(result.config, config, hints)).toEqual(config);
+    const servers = expectDefined(result.config.mcp?.servers, "redacted MCP servers");
+    expect(
+      restoreRedactedValues(
+        { mcp: { servers: { renamed: servers.editable, protected: servers.protected } } },
+        config,
+        hints,
+      ),
+    ).toEqual({
+      mcp: { servers: { renamed: editable, protected: protectedServer } },
     });
-    const result = redactConfigSnapshot(snapshot);
-    const channels = result.config.channels as Record<string, Record<string, string>>;
-    expect(channels.telegram.webhookSecret).toBe(REDACTED_SENTINEL);
   });
 
-  it("redacts env vars that look like secrets", () => {
-    const snapshot = makeSnapshot({
-      env: {
-        vars: {
-          OPENAI_API_KEY: "sk-proj-1234567890abcdefghij",
-          NODE_ENV: "production",
+  it("keeps raw text when runtime materialization adds undefined safe-bin fields", () => {
+    const sourceConfig = { tools: { exec: { mode: "full" } } } satisfies OpenClawConfig;
+    const raw = JSON.stringify(sourceConfig);
+    const runtimeConfig = materializeRuntimeConfig(structuredClone(sourceConfig));
+    const snapshot = { ...makeSnapshot(sourceConfig, raw), config: runtimeConfig, runtimeConfig };
+    expect(runtimeConfig.tools?.exec).toHaveProperty("safeBinProfiles", undefined);
+    expect(redactConfigSnapshot(snapshot).raw).toBe(raw);
+  });
+
+  it("withholds overlapping raw replacements without corrupting SecretRef identity", () => {
+    const config = {
+      gateway: { mode: "default", auth: { password: "default" } }, // pragma: allowlist secret
+      models: {
+        providers: {
+          default: { apiKey: { source: "env", provider: "default", id: "OPENAI_API_KEY" } },
+        },
+      },
+    };
+    const result = redactConfigSnapshot(makeSnapshot(config), mainSchemaHints);
+    expect(result.raw).toBeNull();
+    expect(result.config).toEqual({
+      gateway: { mode: "default", auth: { password: REDACTED_SENTINEL } },
+      models: {
+        providers: {
+          default: { apiKey: { source: "env", provider: "default", id: REDACTED_SENTINEL } },
         },
       },
     });
-    const result = redactConfigSnapshot(snapshot);
-    const env = result.config.env as Record<string, Record<string, string>>;
-    expect(env.vars.OPENAI_API_KEY).toBe(REDACTED_SENTINEL);
-    // NODE_ENV is not sensitive, should be preserved
-    expect(env.vars.NODE_ENV).toBe("production");
+    expect(restoreRedactedValues(result.config, config, mainSchemaHints)).toEqual(config);
   });
 
-  it("redacts raw by key pattern even when parsed config is empty", () => {
-    const snapshot: ConfigFileSnapshot = {
-      path: "/test",
-      exists: true,
-      raw: '{ token: "raw-secret-1234567890" }',
-      parsed: {},
-      valid: false,
-      config: {} as ConfigFileSnapshot["config"],
-      issues: [],
-      warnings: [],
-      legacyIssues: [],
+  it("redacts projections independently without rewriting raw text with another projection's secrets", () => {
+    const config = {
+      gateway: { auth: { token: "synthetic-runtime-token" } },
+      meta: { lastTouchedVersion: "resolved-only-value migration-only-value" },
     };
-    const result = redactConfigSnapshot(snapshot);
-    expect(result.raw).not.toContain("raw-secret-1234567890");
-    expect(result.raw).toContain(REDACTED_SENTINEL);
+    const result = redactConfigSnapshot({
+      ...makeSnapshot(config),
+      resolved: { ...config, gateway: { auth: { token: "resolved-only-value" } } },
+      sourceConfigBeforeMigrations: { gateway: { auth: { token: "migration-only-value" } } },
+    });
+    const expected = { ...config, gateway: { auth: { token: REDACTED_SENTINEL } } };
+    for (const projection of [
+      result.config,
+      result.parsed,
+      result.sourceConfig,
+      result.resolved,
+      result.runtimeConfig,
+    ]) {
+      expect(projection).toEqual(expected);
+    }
+    expect(result.sourceConfig).toBe(result.resolved);
+    expect(result.runtimeConfig).toBe(result.config);
+    expect(result).not.toHaveProperty("sourceConfigBeforeMigrations");
+    expect(result.raw).toBe(JSON.stringify(expected));
   });
 
-  it("redacts sensitive fields even when the value is not a string", () => {
-    const snapshot = makeSnapshot({
-      gateway: { auth: { token: 1234 } },
+  it("falls back to heuristic redaction under unmatched extension subtrees", () => {
+    const hints: ConfigUiHints = { "plugins.entries.proof.config": { label: "Proof" } };
+    const config = {
+      plugins: {
+        entries: { proof: { config: { apiToken: "synthetic-token", displayName: "Proof" } } },
+      },
+    };
+    const result = redactConfigSnapshot(makeSnapshot(config), hints);
+    expect(result.config).toEqual({
+      plugins: {
+        entries: { proof: { config: { apiToken: REDACTED_SENTINEL, displayName: "Proof" } } },
+      },
     });
+    expect(restoreRedactedValues(result.config, config, hints)).toEqual(config);
+  });
+
+  it.each<{ name: string; hints?: ConfigUiHints }>([
+    { name: "heuristic fallback" },
+    { name: "schema hints", hints: { "nested.token[]": { sensitive: true } } },
+  ])("round-trips mixed secret arrays with $name", ({ hints }) => {
+    const config = {
+      nested: { token: ["synthetic-secret", 42, null, "${TOKEN}", ""], harmless: ["visible"] },
+    };
+    const result = redactConfigSnapshot(makeSnapshot(config), hints);
+    expect(result.config).toEqual({
+      nested: { token: [REDACTED_SENTINEL, 42, null, "${TOKEN}", ""], harmless: ["visible"] },
+    });
+    expect(restoreRedactedValues(result.config, config, hints)).toEqual(config);
+  });
+});
+
+describe("generated redaction hints", () => {
+  it("preserves account SecretRef identity via generated channel metadata hints", () => {
+    const hints = buildConfigSchemaCore().uiHints;
+    expect(hints["channels.matrix.accounts.*.password"]?.sensitive).toBe(true);
+    expect(hints["channels.matrix.accounts.*.accessToken"]?.sensitive).toBe(true);
+
+    const snapshot = makeSnapshot({
+      channels: {
+        matrix: {
+          accounts: {
+            work: {
+              password: {
+                source: "store",
+                provider: "default",
+                id: "MATRIX_WORK_PASSWORD",
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const result = redactConfigSnapshot(snapshot, hints);
+    expect(result.config).toHaveProperty("channels.matrix.accounts.work.password", {
+      source: "store",
+      provider: "default",
+      id: REDACTED_SENTINEL,
+    });
+
+    const restored = restoreRedactedValues(result.config, snapshot.config, hints);
+    expect(restored.channels.matrix.accounts.work.password).toEqual({
+      source: "store",
+      provider: "default",
+      id: "MATRIX_WORK_PASSWORD",
+    });
+  });
+
+  it("normalizes authored URL tags and protects custom plugin endpoints", () => {
+    const hints = buildConfigSchemaCore({
+      plugins: [
+        {
+          id: "endpoint-proof",
+          configSchema: { type: "object", properties: { endpoint: { type: "string" } } },
+          configUiHints: { endpoint: { sensitive: false, tags: [" URL-SECRET "] } },
+        },
+      ],
+    }).uiHints;
+    const config = {
+      plugins: {
+        entries: {
+          "endpoint-proof": {
+            config: {
+              endpoint: "https://proof-user:proof-password@example.test/v1?token=proof-token",
+            },
+          },
+        },
+      },
+    };
+    const result = redactConfigSnapshot(makeSnapshot(config), hints);
+    expect(result.config.plugins?.entries?.["endpoint-proof"]?.config?.endpoint).toBe(
+      REDACTED_SENTINEL,
+    );
+    for (const secret of ["proof-user", "proof-password", "proof-token"]) {
+      expect(JSON.stringify(result)).not.toContain(secret);
+    }
+    expect(restoreRedactedValues(result.config, config, hints)).toEqual(config);
+  });
+});
+
+describe("replaceSensitiveValuesInRaw", () => {
+  it("redacts non-empty values while preserving blank strings", () => {
+    const result = replaceSensitiveValuesInRaw({
+      raw: '{ "token": "", "secret": "abc123", "other": "" }',
+      sensitiveValues: ["", "abc123"],
+      redactedSentinel: REDACTED_SENTINEL,
+    });
+    expect(result).toBe(`{ "token": "", "secret": "${REDACTED_SENTINEL}", "other": "" }`);
+  });
+
+  it("replaces longest values first for overlapping matches", () => {
+    const result = replaceSensitiveValuesInRaw({
+      raw: '{ "token": "abcd", "prefix": "ab" }',
+      sensitiveValues: ["ab", "abcd", "abcd"],
+      redactedSentinel: REDACTED_SENTINEL,
+    });
+    expect(result).toBe(`{ "token": "${REDACTED_SENTINEL}", "prefix": "${REDACTED_SENTINEL}" }`);
+  });
+});
+
+describe("redactConfigSnapshot", () => {
+  it.each([true, false])("omits private snapshot fields when valid=%s", (valid) => {
+    const token = "synthetic-canonical-token-canary";
+    const authoredToken = "synthetic-authored-token-canary";
+    const preMigrationToken = "synthetic-pre-migration-token-canary";
+    const snapshot = {
+      ...makeSnapshot({
+        gateway: { auth: { token } },
+        plugins: {
+          allow: ["demo"],
+        },
+      }),
+      valid,
+      authoredConfig: { gateway: { auth: { token: authoredToken } } },
+      sourceConfigBeforeMigrations: makeSnapshot({
+        gateway: { auth: { token: preMigrationToken } },
+      }).sourceConfig,
+      pluginMetadataSnapshot: {
+        manifestRegistry: {
+          plugins: [
+            {
+              id: "demo",
+              rootDir: "/private/plugin/root",
+              manifestPath: "/private/plugin/root/openclaw.plugin.json",
+            },
+          ],
+          diagnostics: [],
+        },
+      },
+    };
+    const original = structuredClone(snapshot);
+
     const result = redactConfigSnapshot(snapshot);
-    const gw = result.config.gateway as Record<string, Record<string, string>>;
-    expect(gw.auth.token).toBe(REDACTED_SENTINEL);
+    const serialized = JSON.stringify(result);
+
+    expect(serialized).not.toContain(preMigrationToken);
+    expect(serialized).not.toContain(authoredToken);
+    expect(serialized).not.toContain(token);
+    expect(serialized).not.toContain("/private/plugin/root");
+    expect("sourceConfigBeforeMigrations" in result).toBe(false);
+    expect("authoredConfig" in result).toBe(false);
+    expect("pluginMetadataSnapshot" in result).toBe(false);
+    expect(result).toMatchObject({ path: snapshot.path, hash: "abc123", exists: true, valid });
+    const expectedConfig = valid
+      ? { gateway: { auth: { token: REDACTED_SENTINEL } }, plugins: { allow: ["demo"] } }
+      : {};
+    expect(result.config).toEqual(expectedConfig);
+    expect(result.sourceConfig).toEqual(expectedConfig);
+    expect(result.resolved).toEqual(expectedConfig);
+    expect(result.runtimeConfig).toEqual(expectedConfig);
+    expect(result.sourceConfig).toBe(result.resolved);
+    expect(result.runtimeConfig).toBe(result.config);
+    if (!valid) {
+      expect(result.raw).toBeNull();
+      expect(result.parsed).toBeNull();
+    }
+    expect(snapshot).toEqual(original);
   });
 });
 
 describe("restoreRedactedValues", () => {
-  it("restores sentinel values from original config", () => {
+  it("keeps array truncation warnings during raw validation", async () => {
+    const snapshot = makeSnapshot({ plugins: { allow: ["source"] } });
+    const runtimeConfig = { plugins: { allow: ["source", "runtime-default"] } };
+    const warnLogs = createWarnLogCapture("openclaw-config-redaction-array-test");
+    try {
+      const result = redactConfigSnapshot({ ...snapshot, config: runtimeConfig, runtimeConfig });
+      expect(result.raw).toBe(snapshot.raw);
+      expect(await warnLogs.findText("Redacted config array key plugins.allow[]")).toContain(
+        "has been truncated",
+      );
+    } finally {
+      warnLogs.cleanup();
+    }
+  });
+
+  it.each(["constructor"])(
+    "rejects inherited %s values when the original key is missing",
+    (key) => {
+      const hints = { [key]: { sensitive: true } };
+      const result = restoreRedactedValues_orig({ [key]: REDACTED_SENTINEL }, {}, hints);
+
+      expect(result.ok).toBe(false);
+    },
+  );
+
+  it("rejects invalid restore inputs", () => {
+    const invalidInputs = [null, undefined, "token-value"] as const;
+    for (const input of invalidInputs) {
+      const result = restoreRedactedValues_orig(input, { token: "x" });
+      expect(result.ok).toBe(false);
+    }
+    expect(restoreRedactedValues_orig("token-value", { token: "x" })).toEqual({
+      ok: false,
+      error: "input not an object",
+    });
+  });
+
+  it("rejects sentinel literals even when uiHints mark the path non-sensitive", () => {
+    const hints: ConfigUiHints = {
+      "gateway.auth.token": { sensitive: false },
+    };
     const incoming = {
       gateway: { auth: { token: REDACTED_SENTINEL } },
     };
     const original = {
-      gateway: { auth: { token: "real-secret-token-value" } },
+      gateway: { auth: { token: "real-secret" } },
     };
-    const result = restoreRedactedValues(incoming, original) as typeof incoming;
-    expect(result.gateway.auth.token).toBe("real-secret-token-value");
+    const result = restoreRedactedValues_orig(incoming, original, hints);
+    expect(result.ok).toBe(false);
+    expect(result.humanReadableMessage).toContain("Reserved redaction sentinel");
   });
 
-  it("preserves explicitly changed sensitive values", () => {
-    const incoming = {
-      gateway: { auth: { token: "new-token-value-from-user" } },
+  describe("stable array identities", () => {
+    const hints = { "accounts[].token": { sensitive: true } };
+    const original = {
+      accounts: [
+        { id: "alpha", token: "synthetic-alpha-token" },
+        { id: "bravo", token: "synthetic-bravo-token" },
+        { id: "charlie", token: "synthetic-charlie-token" },
+      ],
+    };
+
+    it.each([
+      {
+        kind: "ambiguous",
+        siblings: [
+          { id: "duplicate", token: "synthetic-first-duplicate-token" },
+          { id: "duplicate", token: "synthetic-second-duplicate-token" },
+        ],
+      },
+    ])("keeps a unique owner's secret when $kind siblings are deleted", ({ siblings }) => {
+      const previous = {
+        accounts: [...siblings, { id: "bravo", token: "synthetic-bravo-token" }],
+      };
+      const incoming = { accounts: [{ id: "bravo", token: REDACTED_SENTINEL }] };
+
+      expect(restoreRedactedValues(incoming, previous, hints).accounts).toEqual([
+        { id: "bravo", token: "synthetic-bravo-token" },
+      ]);
+    });
+
+    it("rejects a redacted secret for a new identity instead of borrowing its position", () => {
+      const result = restoreRedactedValues_orig(
+        { accounts: [{ id: "new-owner", token: REDACTED_SENTINEL }] },
+        original,
+        hints,
+      );
+
+      expect(result.ok).toBe(false);
+      expect(result.humanReadableMessage).not.toContain("synthetic-alpha-token");
+    });
+
+    it("matches prototype-shaped identities without inherited-key collisions", () => {
+      const previous = {
+        accounts: [
+          { id: "__proto__", token: "synthetic-prototype-token" },
+          { id: "constructor", token: "synthetic-constructor-token" },
+        ],
+      };
+      const incoming = {
+        accounts: [
+          { id: "constructor", token: REDACTED_SENTINEL },
+          { id: "__proto__", token: REDACTED_SENTINEL },
+        ],
+      };
+
+      expect(restoreRedactedValues(incoming, previous, hints).accounts).toEqual([
+        { id: "constructor", token: "synthetic-constructor-token" },
+        { id: "__proto__", token: "synthetic-prototype-token" },
+      ]);
+    });
+
+    it("keeps escaped environment identities positional after runtime substitution", () => {
+      const previous = {
+        accounts: [
+          { id: "${ACCOUNT_ID}", token: "synthetic-literal-token" },
+          { id: "bravo", token: "synthetic-bravo-token" },
+        ],
+      };
+      const incoming = {
+        accounts: [
+          { id: "$${ACCOUNT_ID}", token: REDACTED_SENTINEL },
+          { id: "bravo", token: REDACTED_SENTINEL },
+        ],
+      };
+
+      expect(restoreRedactedValues(incoming, previous, hints).accounts).toEqual([
+        { id: "$${ACCOUNT_ID}", token: "synthetic-literal-token" },
+        { id: "bravo", token: "synthetic-bravo-token" },
+      ]);
+    });
+
+    it("rejects moving an unidentified redacted entry onto an identified owner's position", () => {
+      const previous = {
+        accounts: [
+          { token: "synthetic-unidentified-token" },
+          { id: "bravo", token: "synthetic-bravo-token" },
+        ],
+      };
+      const incoming = {
+        accounts: [{ id: "bravo", token: REDACTED_SENTINEL }, { token: REDACTED_SENTINEL }],
+      };
+
+      const result = restoreRedactedValues_orig(incoming, previous, hints);
+
+      expect(result.ok).toBe(false);
+      expect(result.humanReadableMessage).not.toContain("synthetic-bravo-token");
+    });
+
+    it.each([
+      {
+        reason: "original identities are duplicated",
+        previous: [{ id: "duplicate" }, { id: "duplicate" }],
+        incoming: [{ id: "duplicate" }, { id: "duplicate" }],
+      },
+    ])("keeps positional restoration when $reason", ({ previous, incoming }) => {
+      const restored = restoreRedactedValues(
+        { accounts: incoming.map((entry) => ({ ...entry, token: REDACTED_SENTINEL })) },
+        {
+          accounts: previous.map((entry, index) => ({
+            ...entry,
+            token: `synthetic-${index}-token`,
+          })),
+        },
+        hints,
+      );
+
+      expect(restored.accounts.map((entry) => entry.token)).toEqual([
+        "synthetic-0-token",
+        "synthetic-1-token",
+      ]);
+    });
+  });
+
+  it("matches stable identities independently at each nested array boundary", () => {
+    const hints: ConfigUiHints = {
+      "providers[].accounts[].token": { sensitive: true },
     };
     const original = {
-      gateway: { auth: { token: "old-token-value" } },
-    };
-    const result = restoreRedactedValues(incoming, original) as typeof incoming;
-    expect(result.gateway.auth.token).toBe("new-token-value-from-user");
-  });
-
-  it("preserves non-sensitive fields unchanged", () => {
-    const incoming = {
-      ui: { seamColor: "#ff0000" },
-      gateway: { port: 9999, auth: { token: REDACTED_SENTINEL } },
-    };
-    const original = {
-      ui: { seamColor: "#0088cc" },
-      gateway: { port: 18789, auth: { token: "real-secret" } },
-    };
-    const result = restoreRedactedValues(incoming, original) as typeof incoming;
-    expect(result.ui.seamColor).toBe("#ff0000");
-    expect(result.gateway.port).toBe(9999);
-    expect(result.gateway.auth.token).toBe("real-secret");
-  });
-
-  it("handles deeply nested sentinel restoration", () => {
-    const incoming = {
-      channels: {
-        slack: {
-          accounts: {
-            ws1: { botToken: REDACTED_SENTINEL },
-            ws2: { botToken: "user-typed-new-token-value" },
-          },
+      providers: [
+        {
+          id: "provider-alpha",
+          accounts: [{ id: "account-one", token: "synthetic-alpha-one-token" }],
         },
-      },
-    };
-    const original = {
-      channels: {
-        slack: {
-          accounts: {
-            ws1: { botToken: "original-ws1-token-value" },
-            ws2: { botToken: "original-ws2-token-value" },
-          },
+        {
+          id: "provider-bravo",
+          accounts: [
+            { id: "account-one", token: "synthetic-bravo-one-token" },
+            { id: "account-two", token: "synthetic-bravo-two-token" },
+          ],
         },
-      },
+      ],
     };
-    const result = restoreRedactedValues(incoming, original) as typeof incoming;
-    expect(result.channels.slack.accounts.ws1.botToken).toBe("original-ws1-token-value");
-    expect(result.channels.slack.accounts.ws2.botToken).toBe("user-typed-new-token-value");
-  });
-
-  it("handles missing original gracefully", () => {
     const incoming = {
-      channels: { newChannel: { token: REDACTED_SENTINEL } },
-    };
-    const original = {};
-    expect(() => restoreRedactedValues(incoming, original)).toThrow(/redacted/i);
-  });
-
-  it("handles null and undefined inputs", () => {
-    expect(restoreRedactedValues(null, { token: "x" })).toBeNull();
-    expect(restoreRedactedValues(undefined, { token: "x" })).toBeUndefined();
-  });
-
-  it("round-trips config through redact → restore", () => {
-    const originalConfig = {
-      gateway: { auth: { token: "gateway-auth-secret-token-value" }, port: 18789 },
-      channels: {
-        slack: { botToken: "fake-slack-token-placeholder-value" },
-        telegram: {
-          botToken: "fake-telegram-token-placeholder-value",
-          webhookSecret: "fake-tg-secret-placeholder-value",
+      providers: [
+        {
+          id: "provider-bravo",
+          accounts: [
+            { id: "account-two", token: REDACTED_SENTINEL },
+            { id: "account-one", token: REDACTED_SENTINEL },
+          ],
         },
+      ],
+    };
+
+    const restored = restoreRedactedValues(incoming, original, hints);
+
+    expect(restored.providers).toEqual([
+      {
+        id: "provider-bravo",
+        accounts: [
+          { id: "account-two", token: "synthetic-bravo-two-token" },
+          { id: "account-one", token: "synthetic-bravo-one-token" },
+        ],
       },
+    ]);
+  });
+
+  it("rejects SecretRef source/provider changes when id is still redacted", () => {
+    const incoming = {
       models: {
         providers: {
-          openai: {
-            apiKey: "sk-proj-fake-openai-api-key-value",
-            baseUrl: "https://api.openai.com",
+          default: {
+            apiKey: {
+              source: "file",
+              provider: "vault",
+              id: REDACTED_SENTINEL,
+            },
           },
         },
       },
-      ui: { seamColor: "#0088cc" },
     };
-    const snapshot = makeSnapshot(originalConfig);
+    const original = {
+      models: {
+        providers: {
+          default: {
+            apiKey: {
+              source: "env",
+              provider: "default",
+              id: "OPENAI_API_KEY",
+            },
+          },
+        },
+      },
+    };
+    const result = restoreRedactedValues_orig(incoming, original, mainSchemaHints);
+    expect(result.ok).toBe(false);
+    expect(result.humanReadableMessage).toContain("changed source/provider");
+  });
 
-    // Redact (simulates config.get response)
-    const redacted = redactConfigSnapshot(snapshot);
-
-    // Restore (simulates config.set before write)
-    const restored = restoreRedactedValues(redacted.config, snapshot.config);
-
-    expect(restored).toEqual(originalConfig);
+  it("reports a provider-focused error when original SecretRefs lack provider", () => {
+    const incoming = {
+      models: {
+        providers: {
+          default: {
+            apiKey: {
+              source: "env",
+              id: REDACTED_SENTINEL,
+            },
+          },
+        },
+      },
+    };
+    const original = {
+      models: {
+        providers: {
+          default: {
+            apiKey: {
+              source: "env",
+              id: "OPENAI_API_KEY",
+            },
+          },
+        },
+      },
+    };
+    const result = restoreRedactedValues_orig(incoming, original, mainSchemaHints);
+    expect(result.ok).toBe(false);
+    expect(result.humanReadableMessage).toContain("requires a provider field");
   });
 });

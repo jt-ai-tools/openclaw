@@ -1,246 +1,148 @@
-import fs from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
+import { resolveAgentTimeoutMs } from "../agents/timeout.js";
 import type { OpenClawConfig } from "../config/config.js";
-import { telegramPlugin } from "../../extensions/telegram/src/channel.js";
-import { setTelegramRuntime } from "../../extensions/telegram/src/runtime.js";
-import { whatsappPlugin } from "../../extensions/whatsapp/src/channel.js";
-import { setWhatsAppRuntime } from "../../extensions/whatsapp/src/runtime.js";
-import * as replyModule from "../auto-reply/reply.js";
-import { resolveAgentMainSessionKey, resolveMainSessionKey } from "../config/sessions.js";
-import { setActivePluginRegistry } from "../plugins/runtime.js";
-import { createPluginRuntime } from "../plugins/runtime/index.js";
-import { createTestRegistry } from "../test-utils/channel-plugins.js";
+import { resolveAgentMainSessionKey } from "../config/sessions.js";
+import type { HeartbeatConfig } from "./heartbeat-config.js";
 import { runHeartbeatOnce } from "./heartbeat-runner.js";
+import { seedSessionStore, withTempHeartbeatSandbox } from "./heartbeat-runner.test-utils.js";
+import { enqueueSystemEvent, resetSystemEventsForTest } from "./system-events.js";
 
-// Avoid pulling optional runtime deps during isolated runs.
-vi.mock("jiti", () => ({ createJiti: () => () => ({}) }));
-
-type SeedSessionInput = {
-  lastChannel: string;
-  lastTo: string;
-  updatedAt?: number;
-};
-
-async function withHeartbeatFixture(
-  run: (ctx: {
-    tmpDir: string;
-    storePath: string;
-    seedSession: (sessionKey: string, input: SeedSessionInput) => Promise<void>;
-  }) => Promise<void>,
-) {
-  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-hb-model-"));
-  const storePath = path.join(tmpDir, "sessions.json");
-
-  const seedSession = async (sessionKey: string, input: SeedSessionInput) => {
-    await fs.writeFile(
-      storePath,
-      JSON.stringify(
-        {
-          [sessionKey]: {
-            sessionId: "sid",
-            updatedAt: input.updatedAt ?? Date.now(),
-            lastChannel: input.lastChannel,
-            lastTo: input.lastTo,
-          },
-        },
-        null,
-        2,
-      ),
-    );
-  };
-
-  try {
-    await run({ tmpDir, storePath, seedSession });
-  } finally {
-    await fs.rm(tmpDir, { recursive: true, force: true });
-  }
-}
-
-beforeEach(() => {
-  const runtime = createPluginRuntime();
-  setTelegramRuntime(runtime);
-  setWhatsAppRuntime(runtime);
-  setActivePluginRegistry(
-    createTestRegistry([
-      { pluginId: "whatsapp", plugin: whatsappPlugin, source: "test" },
-      { pluginId: "telegram", plugin: telegramPlugin, source: "test" },
-    ]),
-  );
-});
+vi.mock("./outbound/deliver.js", () => ({
+  deliverOutboundPayloads: vi.fn().mockResolvedValue([]),
+  deliverOutboundPayloadsInternal: vi.fn().mockResolvedValue([]),
+}));
 
 afterEach(() => {
+  resetSystemEventsForTest();
   vi.restoreAllMocks();
 });
 
-describe("runHeartbeatOnce – heartbeat model override", () => {
-  it("passes heartbeatModelOverride from defaults heartbeat config", async () => {
-    await withHeartbeatFixture(async ({ tmpDir, storePath, seedSession }) => {
-      const cfg: OpenClawConfig = {
-        agents: {
-          defaults: {
-            workspace: tmpDir,
-            heartbeat: {
-              every: "5m",
-              target: "whatsapp",
-              model: "ollama/llama3.2:1b",
-            },
-          },
+type RunOptions = Parameters<typeof runHeartbeatOnce>[0];
+async function replyOptions(
+  params: {
+    heartbeat?: HeartbeatConfig;
+    defaultTimeoutSeconds?: number;
+    perAgent?: HeartbeatConfig;
+    wake?: Pick<RunOptions, "source" | "intent" | "tasks" | "heartbeat">;
+    event?: { text: string; contextKey?: string; isolated?: boolean };
+  } = {},
+) {
+  return withTempHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
+    const agentId = params.perAgent ? "ops" : "main";
+    const cfg: OpenClawConfig = {
+      agents: {
+        defaults: {
+          workspace: tmpDir,
+          timeoutSeconds: params.defaultTimeoutSeconds,
+          heartbeat: { every: "5m", target: "whatsapp", ...params.heartbeat },
         },
-        channels: { whatsapp: { allowFrom: ["*"] } },
-        session: { store: storePath },
-      };
-      const sessionKey = resolveMainSessionKey(cfg);
-      await seedSession(sessionKey, { lastChannel: "whatsapp", lastTo: "+1555" });
-
-      const replySpy = vi.spyOn(replyModule, "getReplyFromConfig");
-      replySpy.mockResolvedValue({ text: "HEARTBEAT_OK" });
-
-      await runHeartbeatOnce({
-        cfg,
-        deps: {
-          getQueueSize: () => 0,
-          nowMs: () => 0,
-        },
-      });
-
-      expect(replySpy).toHaveBeenCalledWith(
-        expect.any(Object),
-        expect.objectContaining({
-          isHeartbeat: true,
-          heartbeatModelOverride: "ollama/llama3.2:1b",
-        }),
-        cfg,
-      );
-    });
-  });
-
-  it("passes per-agent heartbeat model override (merged with defaults)", async () => {
-    await withHeartbeatFixture(async ({ storePath, seedSession }) => {
-      const cfg: OpenClawConfig = {
-        agents: {
-          defaults: {
-            heartbeat: {
-              every: "30m",
-              model: "openai/gpt-4o-mini",
-            },
-          },
-          list: [
-            { id: "main", default: true },
-            {
-              id: "ops",
-              heartbeat: {
-                every: "5m",
-                target: "whatsapp",
-                model: "ollama/llama3.2:1b",
+        ...(params.perAgent
+          ? {
+              entries: {
+                main: {},
+                ops: { workspace: tmpDir, heartbeat: params.perAgent },
               },
-            },
-          ],
-        },
-        channels: { whatsapp: { allowFrom: ["*"] } },
-        session: { store: storePath },
-      };
-      const sessionKey = resolveAgentMainSessionKey({ cfg, agentId: "ops" });
-      await seedSession(sessionKey, { lastChannel: "whatsapp", lastTo: "+1555" });
-
-      const replySpy = vi.spyOn(replyModule, "getReplyFromConfig");
-      replySpy.mockResolvedValue({ text: "HEARTBEAT_OK" });
-
-      await runHeartbeatOnce({
-        cfg,
-        agentId: "ops",
-        deps: {
-          getQueueSize: () => 0,
-          nowMs: () => 0,
-        },
-      });
-
-      expect(replySpy).toHaveBeenCalledWith(
-        expect.any(Object),
-        expect.objectContaining({
-          isHeartbeat: true,
-          heartbeatModelOverride: "ollama/llama3.2:1b",
-        }),
-        cfg,
-      );
+            }
+          : {}),
+      },
+      channels: { whatsapp: { allowFrom: ["*"] } },
+      session: { store: storePath },
+    };
+    const baseKey = resolveAgentMainSessionKey({ cfg, agentId });
+    const sessionKey = `${baseKey}${params.event?.isolated ? ":heartbeat" : ""}`;
+    await seedSessionStore(storePath, sessionKey, {
+      lastChannel: "whatsapp",
+      lastProvider: "whatsapp",
+      lastTo: "+1555",
     });
+    if (params.event) {
+      enqueueSystemEvent(params.event.text, { sessionKey, contextKey: params.event.contextKey });
+    }
+    replySpy.mockResolvedValue({ text: "HEARTBEAT_OK" });
+    await runHeartbeatOnce({
+      cfg,
+      agentId,
+      sessionKey,
+      ...params.wake,
+      deps: { getReplyFromConfig: replySpy, getQueueSize: () => 0, nowMs: () => 0 },
+    });
+    expect(replySpy).toHaveBeenCalledOnce();
+    const [ctx, options, passedConfig] = replySpy.mock.calls[0]!;
+    expect(passedConfig).toBe(cfg);
+    expect(options?.isHeartbeat).toBe(true);
+    return { ctx, options, cfg };
   });
+}
 
-  it("does not pass heartbeatModelOverride when no heartbeat model is configured", async () => {
-    await withHeartbeatFixture(async ({ tmpDir, storePath, seedSession }) => {
-      const cfg: OpenClawConfig = {
-        agents: {
-          defaults: {
-            workspace: tmpDir,
-            heartbeat: {
-              every: "5m",
-              target: "whatsapp",
-            },
-          },
-        },
-        channels: { whatsapp: { allowFrom: ["*"] } },
-        session: { store: storePath },
-      };
-      const sessionKey = resolveMainSessionKey(cfg);
-      await seedSession(sessionKey, { lastChannel: "whatsapp", lastTo: "+1555" });
-
-      const replySpy = vi.spyOn(replyModule, "getReplyFromConfig");
-      replySpy.mockResolvedValue({ text: "HEARTBEAT_OK" });
-
-      await runHeartbeatOnce({
-        cfg,
-        deps: {
-          getQueueSize: () => 0,
-          nowMs: () => 0,
-        },
-      });
-
-      expect(replySpy).toHaveBeenCalledTimes(1);
-      const replyOpts = replySpy.mock.calls[0]?.[1];
-      expect(replyOpts).toStrictEqual({ isHeartbeat: true });
-      expect(replyOpts).not.toHaveProperty("heartbeatModelOverride");
-    });
+it("keeps configured run options when a direct wake overrides only the destination", async () => {
+  const { options } = await replyOptions({
+    heartbeat: { timeoutSeconds: 45, lightContext: true, model: "openai/gpt-5.4" },
+    perAgent: { model: "  ollama/llama3.2:1b  " },
+    wake: { source: "manual", heartbeat: { target: "last" } },
   });
-
-  it("trims heartbeat model override before passing it downstream", async () => {
-    await withHeartbeatFixture(async ({ tmpDir, storePath, seedSession }) => {
-      const cfg: OpenClawConfig = {
-        agents: {
-          defaults: {
-            workspace: tmpDir,
-            heartbeat: {
-              every: "5m",
-              target: "whatsapp",
-              model: "  ollama/llama3.2:1b  ",
-            },
-          },
-        },
-        channels: { whatsapp: { allowFrom: ["*"] } },
-        session: { store: storePath },
-      };
-      const sessionKey = resolveMainSessionKey(cfg);
-      await seedSession(sessionKey, { lastChannel: "whatsapp", lastTo: "+1555" });
-
-      const replySpy = vi.spyOn(replyModule, "getReplyFromConfig");
-      replySpy.mockResolvedValue({ text: "HEARTBEAT_OK" });
-
-      await runHeartbeatOnce({
-        cfg,
-        deps: {
-          getQueueSize: () => 0,
-          nowMs: () => 0,
-        },
-      });
-
-      expect(replySpy).toHaveBeenCalledWith(
-        expect.any(Object),
-        expect.objectContaining({
-          isHeartbeat: true,
-          heartbeatModelOverride: "ollama/llama3.2:1b",
-        }),
-        cfg,
-      );
-    });
+  expect(options).toMatchObject({
+    timeoutOverrideSeconds: 45,
+    bootstrapContextMode: "lightweight",
+    heartbeatModelOverride: "ollama/llama3.2:1b",
   });
 });
+
+it.each([
+  ["exec continuation", "exec-event", "exec", false, false, false, 48 * 60 * 60_000],
+  ["scheduled exec deferred", "exec-event", "exec", true, false, false, 45_000],
+  [
+    "scheduled blocked-task continuation",
+    "background-task-blocked",
+    "task",
+    true,
+    false,
+    false,
+    48 * 60 * 60_000,
+  ],
+  ["unconsumed base-session task", "background-task", "task", false, true, false, 45_000],
+  ["isolated execution-queue task", "background-task", "task", false, true, true, 48 * 60 * 60_000],
+  ["cron-carried task", "cron", "task", false, false, false, 48 * 60 * 60_000],
+] as const)(
+  "preserves the admitted-work timeout for %s",
+  async (_name, source, event, scheduled, isolated, executionQueue, expected) => {
+    const { ctx, options, cfg } = await replyOptions({
+      heartbeat: { timeoutSeconds: 45, isolatedSession: isolated },
+      event: {
+        text:
+          event === "exec"
+            ? "Exec finished (gateway id=build, code 0)\nBuild passed"
+            : "Delegated task completed. Review and verify the result.",
+        contextKey: event === "task" ? "task:review" : undefined,
+        isolated: executionQueue,
+      },
+      wake: {
+        source,
+        intent: source === "exec-event" ? "event" : "immediate",
+        tasks: scheduled
+          ? [{ jobId: "monitor", name: "status", prompt: "Check service status" }]
+          : undefined,
+      },
+    });
+    expect(ctx?.InternalTurnSource).toBe(
+      scheduled
+        ? "heartbeat"
+        : source === "cron"
+          ? "cron"
+          : event === "exec"
+            ? "exec"
+            : "heartbeat",
+    );
+    expect(resolveAgentTimeoutMs({ cfg, overrideSeconds: options?.timeoutOverrideSeconds })).toBe(
+      expected,
+    );
+    if (isolated) {
+      expect(options).toHaveProperty("cleanupBundleMcpOnRunEnd", true);
+    } else {
+      expect(options).not.toHaveProperty("cleanupBundleMcpOnRunEnd");
+    }
+    if (scheduled) {
+      expect(ctx.Body).toContain("- status: Check service status");
+      expect(ctx.Body).toContain("After completing all due tasks");
+    }
+  },
+);

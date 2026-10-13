@@ -1,129 +1,168 @@
-import type { Api, Model } from "@mariozechner/pi-ai";
+/** Reads the selected Gateway catalog or an explicitly identified local published view. */
+import { normalizeProviderId } from "@openclaw/model-catalog-core/provider-id";
+import type {
+  ModelChoice,
+  ModelsListParams,
+} from "../../../packages/gateway-protocol/src/schema/model-catalog.js";
+import { sanitizeTerminalText } from "../../../packages/terminal-core/src/safe-text.js";
+import { modelKey } from "../../agents/model-ref-shared.js";
+import { ExpectedCliError } from "../../cli/failure-output.js";
+import { runWithLocalStateOwner } from "../../cli/local-state-owner.js";
+import { requestExitAfterOneShotOutput } from "../../cli/one-shot-exit.js";
+import { captureRuntimeConfigAsyncReader } from "../../config/config.js";
+import { startProxy, stopProxy } from "../../infra/net/proxy/proxy-lifecycle.js";
 import type { RuntimeEnv } from "../../runtime.js";
-import type { ModelRow } from "./list.types.js";
-import { ensureAuthProfileStore } from "../../agents/auth-profiles.js";
-import { parseModelRef } from "../../agents/model-selection.js";
-import { loadConfig } from "../../config/config.js";
-import { resolveConfiguredEntries } from "./list.configured.js";
-import { loadModelRegistry, toModelRow } from "./list.registry.js";
+import { getModelCatalogWarnings, readSelectedGatewayModelCatalog } from "./catalog-warnings.js";
 import { printModelTable } from "./list.table.js";
-import { DEFAULT_PROVIDER, ensureFlagCompatibility, modelKey } from "./shared.js";
+import type { ModelRow } from "./list.types.js";
+import { loadModelsConfigWithSource } from "./load-config.js";
+import { ensureFlagCompatibility, resolveModelsTargetAgent } from "./shared.js";
+
+// The catalog worker permits three minutes; leave room for connection and result projection.
+const MODEL_CATALOG_REFRESH_TIMEOUT_MS = 210_000;
+
+function toCliModelRow(model: ModelChoice): ModelRow {
+  return {
+    key: modelKey(model.provider, model.id),
+    name: model.name,
+    input: model.input?.join("+") || "-",
+    contextWindow: model.contextWindow ?? null,
+    ...(model.contextTokens !== undefined ? { contextTokens: model.contextTokens } : {}),
+    local: model.local ?? null,
+    available: model.available ?? null,
+    tags: [...new Set([...(model.tags ?? []), ...(model.alias ? [`alias:${model.alias}`] : [])])],
+  };
+}
 
 export async function modelsListCommand(
   opts: {
     all?: boolean;
+    refresh?: boolean;
     local?: boolean;
     provider?: string;
+    agent?: string;
     json?: boolean;
     plain?: boolean;
   },
   runtime: RuntimeEnv,
 ) {
   ensureFlagCompatibility(opts);
-  const cfg = loadConfig();
-  const authStore = ensureAuthProfileStore();
-  const providerFilter = (() => {
-    const raw = opts.provider?.trim();
-    if (!raw) {
-      return undefined;
-    }
-    const parsed = parseModelRef(`${raw}/_`, DEFAULT_PROVIDER);
-    return parsed?.provider ?? raw.toLowerCase();
-  })();
-
-  let models: Model<Api>[] = [];
-  let availableKeys: Set<string> | undefined;
-  try {
-    const loaded = await loadModelRegistry(cfg);
-    models = loaded.models;
-    availableKeys = loaded.availableKeys;
-  } catch (err) {
-    runtime.error(`Model registry unavailable: ${String(err)}`);
+  const rawProvider = opts.provider?.trim();
+  if (rawProvider && /\s/u.test(rawProvider)) {
+    const message = `Invalid provider filter "${sanitizeTerminalText(rawProvider)}". Use a provider id such as "moonshot", not a display label.`;
+    throw new ExpectedCliError({ message, humanOutput: message, machineOutput: message });
   }
-
-  const modelByKey = new Map(models.map((model) => [modelKey(model.provider, model.id), model]));
-
-  const { entries } = resolveConfiguredEntries(cfg);
-  const configuredByKey = new Map(entries.map((entry) => [entry.key, entry]));
-
-  const rows: ModelRow[] = [];
-
-  const isLocalBaseUrl = (baseUrl: string) => {
-    try {
-      const url = new URL(baseUrl);
-      const host = url.hostname.toLowerCase();
-      return (
-        host === "localhost" ||
-        host === "127.0.0.1" ||
-        host === "0.0.0.0" ||
-        host === "::1" ||
-        host.endsWith(".local")
-      );
-    } catch {
-      return false;
-    }
+  const provider = rawProvider ? normalizeProviderId(rawProvider) : undefined;
+  // Gateway selection needs connection config, not local provider credentials or plugins.
+  const cfg = await captureRuntimeConfigAsyncReader({ skipPluginValidation: true })();
+  const params: ModelsListParams = {
+    ...(opts.agent?.trim() ? { agentId: opts.agent.trim() } : {}),
+    view: opts.all || provider ? "all" : "default",
+    ...(provider ? { provider } : {}),
+    includeDetails: true,
+    ...(opts.refresh ? { refresh: true } : {}),
   };
-
-  if (opts.all) {
-    const sorted = [...models].toSorted((a, b) => {
-      const p = a.provider.localeCompare(b.provider);
-      if (p !== 0) {
-        return p;
+  let result = await readSelectedGatewayModelCatalog(
+    cfg,
+    params,
+    opts.refresh ? MODEL_CATALOG_REFRESH_TIMEOUT_MS : undefined,
+  );
+  if (!result) {
+    runtime.error(
+      opts.refresh
+        ? "Gateway is not running. Refreshing the local model catalog."
+        : "Gateway is not running. Showing the local cached model catalog. Use --refresh to discover provider models.",
+    );
+    const [
+      { resolvePublishedModelCatalogOwner },
+      { withPreparedModelCatalogOwner },
+      { getPreparedModelRuntimeAuthMaterializations },
+      { buildModelsListResult },
+    ] = await Promise.all([
+      import("../../agents/prepared-model-catalog-owner.js"),
+      import("../../agents/prepared-model-catalog.js"),
+      import("../../agents/prepared-model-runtime-auth.js"),
+      import("../../gateway/server-methods/models-list-result.js"),
+    ]);
+    const readLocal = async () => {
+      const { resolvedConfig: localConfig } = await loadModelsConfigWithSource({
+        commandName: "models list",
+        runtime,
+      });
+      const { agentId, agentDir } = resolveModelsTargetAgent(localConfig, opts.agent, {
+        kind: "read",
+      });
+      const proxy = opts.refresh ? await startProxy(localConfig.proxy) : null;
+      try {
+        return await withPreparedModelCatalogOwner(
+          {
+            agentId,
+            agentDir,
+            config: localConfig,
+            readOnly: opts.refresh !== true,
+            ...(opts.refresh ? { refreshFullCatalog: true, persistOfflineRefresh: true } : {}),
+          },
+          async (snapshot) => {
+            const owner = resolvePublishedModelCatalogOwner(snapshot);
+            // Complete row projection and its final readiness reads before releasing a temporary owner.
+            return await buildModelsListResult({
+              source: {
+                kind: "published",
+                owner: {
+                  ...owner,
+                  authMaterializations: getPreparedModelRuntimeAuthMaterializations(snapshot),
+                },
+              },
+              agentId,
+              params,
+            });
+          },
+        );
+      } finally {
+        await stopProxy(proxy);
       }
-      return a.id.localeCompare(b.id);
-    });
-
-    for (const model of sorted) {
-      if (providerFilter && model.provider.toLowerCase() !== providerFilter) {
-        continue;
-      }
-      if (opts.local && !isLocalBaseUrl(model.baseUrl)) {
-        continue;
-      }
-      const key = modelKey(model.provider, model.id);
-      const configured = configuredByKey.get(key);
-      rows.push(
-        toModelRow({
-          model,
-          key,
-          tags: configured ? Array.from(configured.tags) : [],
-          aliases: configured?.aliases ?? [],
-          availableKeys,
-          cfg,
-          authStore,
-        }),
-      );
-    }
-  } else {
-    for (const entry of entries) {
-      if (providerFilter && entry.ref.provider.toLowerCase() !== providerFilter) {
-        continue;
-      }
-      const model = modelByKey.get(entry.key);
-      if (opts.local && model && !isLocalBaseUrl(model.baseUrl)) {
-        continue;
-      }
-      if (opts.local && !model) {
-        continue;
-      }
-      rows.push(
-        toModelRow({
-          model,
-          key: entry.key,
-          tags: Array.from(entry.tags),
-          aliases: entry.aliases,
-          availableKeys,
-          cfg,
-          authStore,
-        }),
-      );
-    }
+    };
+    result = opts.refresh
+      ? await runWithLocalStateOwner({
+          method: "models.list",
+          params,
+          target: "local model catalog",
+          onForeignOwner: "refuse",
+          runLocal: async ({ assertCurrent }) => {
+            assertCurrent();
+            const refreshed = await readLocal();
+            assertCurrent();
+            return refreshed;
+          },
+        })
+      : await readLocal();
   }
-
-  if (rows.length === 0) {
+  for (const warning of getModelCatalogWarnings(result)) {
+    runtime.error(`${warning.message} ${warning.fixHint}`);
+  }
+  if (result.refreshFailed) {
+    runtime.error(
+      "Model discovery could not refresh all providers. Showing the available published model list.",
+    );
+  }
+  for (const outcome of result.providerOutcomes ?? []) {
+    if (outcome.status === "ready") {
+      continue;
+    }
+    const label = `${sanitizeTerminalText(outcome.provider)}${outcome.profileId ? ` (profile ${sanitizeTerminalText(outcome.profileId)})` : ""}`;
+    runtime.error(
+      outcome.status === "auth-rejected"
+        ? `Model discovery authentication was rejected for ${label}. Open Models in the Control UI to check sign-in and catalog access, then retry with --refresh.`
+        : `Model discovery is unavailable for ${label}. Retry with --refresh; if it still fails, check the provider in Models in the Control UI.`,
+    );
+  }
+  const rows = result.models
+    .filter((model) => !opts.local || model.local === true)
+    .map(toCliModelRow);
+  if (rows.length === 0 && !opts.json && !opts.plain) {
     runtime.log("No models found.");
-    return;
+  } else {
+    printModelTable(rows, runtime, { ...opts, providerOutcomes: result.providerOutcomes });
   }
-
-  printModelTable(rows, runtime, opts);
+  requestExitAfterOneShotOutput(runtime);
 }

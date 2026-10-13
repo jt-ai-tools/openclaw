@@ -1,289 +1,285 @@
-import { describe, expect, it } from "vitest";
-import { MissingEnvVarError, resolveConfigEnvVars } from "./env-substitution.js";
+import { expect, it } from "vitest";
+import {
+  type EnvSubstitutionWarning,
+  MissingEnvVarError,
+  containsEnvVarReference,
+  resolveConfigEnvVars,
+} from "./env-substitution.js";
+import {
+  createConfigResolutionFacts,
+  getAuthoredConfigSecretRef,
+  getResolvedConfigEnvSecretRef,
+  setConfigResolutionFacts,
+} from "./resolution-facts.js";
 
-describe("resolveConfigEnvVars", () => {
-  describe("basic substitution", () => {
-    it("substitutes a single env var", () => {
-      const result = resolveConfigEnvVars({ key: "${FOO}" }, { FOO: "bar" });
-      expect(result).toEqual({ key: "bar" });
-    });
+it("resolves string templates, escapes and defaults without warnings", () => {
+  const cases: Array<[string, Record<string, string>, string]> = [
+    ["${FOO}", { FOO: "bar" }, "bar"],
+    ["${A}/${B}", { A: "x", B: "y" }, "x/y"],
+    ["prefix-${FOO}-suffix", { FOO: "bar" }, "prefix-bar-suffix"],
+    ["${FOO}:${FOO}", { FOO: "bar" }, "bar:bar"],
+    ["$${VAR}", { VAR: "value" }, "${VAR}"],
+    ["${REAL}/$${LITERAL}", { REAL: "resolved" }, "resolved/${LITERAL}"],
+    ["$${FOO} ${FOO}", { FOO: "bar" }, "${FOO} bar"],
+    ["${FOO} $${FOO}", { FOO: "bar" }, "bar ${FOO}"],
+    ["$${A}:$${B}", {}, "${A}:${B}"],
+    ["${FOO}", { FOO: "$${BAR}" }, "$${BAR}"],
+    ["${_UNDERSCORE_START}", { _UNDERSCORE_START: "valid" }, "valid"],
+    ["${VAR_WITH_NUMBERS_123}", { VAR_WITH_NUMBERS_123: "valid" }, "valid"],
+    ["${NAUTOBOT_TIMEOUT:-60}", {}, "60"],
+    ["${NAUTOBOT_TIMEOUT:-60}", { NAUTOBOT_TIMEOUT: "90" }, "90"],
+    ["${NAUTOBOT_TIMEOUT:-60}", { NAUTOBOT_TIMEOUT: "" }, "60"],
+    ["${OPTIONAL_SUFFIX:-}", {}, ""],
+    ["https://${API_HOST:-api.example.com}/v1", {}, "https://api.example.com/v1"],
+    ["${API_HOST:-localhost}:${API_PORT:-8080}", { API_HOST: "example.com" }, "example.com:8080"],
+    ["${VAR:-a b  c}", {}, "a b  c"],
+    ["${VAR:-:-}", {}, ":-"],
+    ["${VAR:--5}", {}, "-5"],
+    ["$${VAR:-x}", { VAR: "from-env" }, "${VAR:-x}"],
+    ["$${VAR:-x}", {}, "${VAR:-x}"],
+    ["${A:-${B}}", { A: "a-value", B: "b-value" }, "${A:-b-value}"],
+    ["${A:-${B:-c}}", {}, "${A:-c}"],
+    ...[
+      "$VAR",
+      "${lowercase}",
+      "${MixedCase}",
+      "${123INVALID}",
+      "${VAR:=d}",
+      "${VAR:?m}",
+      "${VAR:+a}",
+      "${VAR-d}",
+      "${VAR#p}",
+      "${VAR%s}",
+      "${VAR/a/b}",
+      "${VAR:json}",
+      "${lowercase:-d}",
+      "${MixedCase:-d}",
+      "${123INVALID:-d}",
+      "${:-d}",
+      "${my-service} ${count+1} ${a=b}",
+      '${A:-{"n":1}}',
+      "${PRICE:-$5}",
+    ].map((literal): [string, Record<string, string>, string] => [
+      literal,
+      { VAR: "value", lowercase: "value", MixedCase: "value" },
+      literal,
+    ]),
+  ];
+  for (const [input, env, expected] of cases) {
+    const warnings: EnvSubstitutionWarning[] = [];
+    expect(
+      resolveConfigEnvVars({ key: input }, env, {
+        onMissing: (warning) => warnings.push(warning),
+      }),
+      input,
+    ).toEqual({ key: expected });
+    expect(warnings, input).toEqual([]);
+  }
+  expect(
+    resolveConfigEnvVars({ missing: "${MISSING:-60}", empty: "${EMPTY:-}" }, { EMPTY: "" }),
+  ).toEqual({ missing: "60", empty: "" });
+});
 
-    it("substitutes multiple different env vars in same string", () => {
-      const result = resolveConfigEnvVars({ key: "${A}/${B}" }, { A: "x", B: "y" });
-      expect(result).toEqual({ key: "x/y" });
-    });
+it("resolves nested containers and preserves non-string values", () => {
+  const cases: Array<[unknown, unknown]> = [
+    [{ outer: { inner: { key: "${A}" } } }, { outer: { inner: { key: "1" } } }],
+    [{ items: ["${A}", "${B}"] }, { items: ["1", "2"] }],
+    [
+      { providers: [{ apiKey: "${A}" }, { apiKey: "${B}" }] },
+      { providers: [{ apiKey: "1" }, { apiKey: "2" }] },
+    ],
+    [{}, {}],
+    [[], []],
+    [
+      { num: 42, bool: true, nil: null, arr: [1, 2] },
+      { num: 42, bool: true, nil: null, arr: [1, 2] },
+    ],
+  ];
+  for (const [config, expected] of cases) {
+    expect(resolveConfigEnvVars(config, { A: "1", B: "2" })).toEqual(expected);
+  }
+  for (const value of ["hello", 42, true, null]) {
+    expect(resolveConfigEnvVars(value, {})).toBe(value);
+  }
+});
 
-    it("substitutes inline with prefix and suffix", () => {
-      const result = resolveConfigEnvVars({ key: "prefix-${FOO}-suffix" }, { FOO: "bar" });
-      expect(result).toEqual({ key: "prefix-bar-suffix" });
-    });
+it("reports missing and empty variables at canonical config paths", () => {
+  const cases: Array<[unknown, string, Record<string, string>?]> = [
+    [{ key: "${MISSING}" }, "key"],
+    [{ key: "${MISSING}" }, "key", { MISSING: "" }],
+    [{ outer: { inner: { key: "${MISSING}" } } }, "outer.inner.key"],
+    [{ items: ["ok", "${MISSING}"] }, "items[1]"],
+    [
+      { plugins: { entries: { "foo.config.bar": { token: "${MISSING}" } } } },
+      'plugins.entries["foo.config.bar"].token',
+    ],
+    [
+      { plugins: { entries: { fixture: { config: { headers: { "X.Trace": "${MISSING}" } } } } } },
+      'plugins.entries.fixture.config.headers["X.Trace"]',
+    ],
+    [
+      {
+        plugins: { entries: { fixture: { config: { headers: { X: { Trace: "${MISSING}" } } } } } },
+      },
+      "plugins.entries.fixture.config.headers.X.Trace",
+    ],
+    [
+      { plugins: { entries: { fixture: { config: { headers: { "0": "${MISSING}" } } } } } },
+      'plugins.entries.fixture.config.headers["0"]',
+    ],
+    [{ "root.key": "${MISSING}" }, '["root.key"]'],
+    [
+      { plugins: { entries: { fixture: { config: { headers: ["${MISSING}"] } } } } },
+      "plugins.entries.fixture.config.headers[0]",
+    ],
+    [
+      { providers: { "vercel-gateway": { apiKey: "${MISSING}" } } },
+      "providers.vercel-gateway.apiKey",
+    ],
+  ];
+  for (const [config, configPath, env = {}] of cases) {
+    try {
+      resolveConfigEnvVars(config, env);
+      expect.fail("expected MissingEnvVarError");
+    } catch (error) {
+      expect(error).toBeInstanceOf(MissingEnvVarError);
+      expect(error).toMatchObject({ varName: "MISSING", configPath });
+    }
+  }
+});
 
-    it("substitutes same var multiple times", () => {
-      const result = resolveConfigEnvVars({ key: "${FOO}:${FOO}" }, { FOO: "bar" });
-      expect(result).toEqual({ key: "bar:bar" });
-    });
+it("retains sparse arrays, literal keys, escaping and depth-first callback order", () => {
+  const items: unknown[] = [];
+  items.length = 3;
+  items[1] = { missing: "${FIRST}", resolved: "${LATER}", escaped: "$${LATER}" };
+  const env = { LATER: "before-callback" };
+  const warnings: EnvSubstitutionWarning[] = [];
+  const result = resolveConfigEnvVars({ items, tail: "${LAST}", "${KEY}": "literal-key" }, env, {
+    onMissing: (warning) => {
+      warnings.push(warning);
+      env.LATER = "after-callback";
+    },
   });
+  const expectedItems: unknown[] = [];
+  expectedItems.length = 3;
+  expectedItems[1] = {
+    missing: "${FIRST}",
+    resolved: "after-callback",
+    escaped: "${LATER}",
+  };
+  expect(result).toStrictEqual({
+    items: expectedItems,
+    tail: "${LAST}",
+    "${KEY}": "literal-key",
+  });
+  expect(warnings).toEqual([
+    { varName: "FIRST", configPath: "items[1].missing" },
+    { varName: "LAST", configPath: "tail" },
+  ]);
+});
 
-  describe("nested structures", () => {
-    it("substitutes in nested objects", () => {
-      const result = resolveConfigEnvVars(
-        {
-          outer: {
-            inner: {
-              key: "${API_KEY}",
+it("keeps pending and resolved SecretRef provenance distinct across config paths", () => {
+  const pendingEnvSecretRefs = new Map<string, string>();
+  const resolvedEnvSecretRefs = new Map<string, string>();
+  const config = resolveConfigEnvVars(
+    {
+      plugins: {
+        entries: {
+          "foo.config.bar": { config: { token: "$ATTACKER" } },
+          foo: {
+            config: {
+              bar: { config: { token: "$VICTIM" } },
+              headers: {
+                "X.Trace": "$DOTTED_HEADER",
+                X: { Trace: "$NESTED_HEADER" },
+              },
             },
           },
         },
-        { API_KEY: "secret123" },
-      );
-      expect(result).toEqual({
-        outer: {
-          inner: {
-            key: "secret123",
+      },
+      models: {
+        providers: {
+          "alpha:beta": {
+            apiKey: "$CORE_PROVIDER",
+            headers: { "X.Trace": "$CORE_HEADER" },
           },
         },
-      });
-    });
+      },
+      resolved: "${RESOLVED_SECRET}",
+    },
+    { RESOLVED_SECRET: "resolved-value" },
+    {
+      onPendingEnvSecretRef: (id, configPath) => pendingEnvSecretRefs.set(configPath, id),
+      onResolvedEnvSecretRef: (id, configPath) => resolvedEnvSecretRefs.set(configPath, id),
+    },
+  );
+  setConfigResolutionFacts(
+    config,
+    createConfigResolutionFacts([], pendingEnvSecretRefs, undefined, resolvedEnvSecretRefs),
+  );
 
-    it("substitutes in arrays", () => {
-      const result = resolveConfigEnvVars(
-        { items: ["${A}", "${B}", "${C}"] },
-        { A: "1", B: "2", C: "3" },
-      );
-      expect(result).toEqual({ items: ["1", "2", "3"] });
+  expect([...pendingEnvSecretRefs]).toEqual([
+    ['plugins.entries["foo.config.bar"].config.token', "ATTACKER"],
+    ["plugins.entries.foo.config.bar.config.token", "VICTIM"],
+    ['plugins.entries.foo.config.headers["X.Trace"]', "DOTTED_HEADER"],
+    ["plugins.entries.foo.config.headers.X.Trace", "NESTED_HEADER"],
+    ["models.providers.alpha:beta.apiKey", "CORE_PROVIDER"],
+    ['models.providers.alpha:beta.headers["X.Trace"]', "CORE_HEADER"],
+  ]);
+  expect([...resolvedEnvSecretRefs]).toEqual([["resolved", "RESOLVED_SECRET"]]);
+  for (const [configPath, id] of pendingEnvSecretRefs) {
+    expect(getAuthoredConfigSecretRef(config, configPath), configPath).toEqual({
+      source: "env",
+      provider: "default",
+      id,
     });
-
-    it("substitutes in deeply nested arrays and objects", () => {
-      const result = resolveConfigEnvVars(
-        {
-          providers: [
-            { name: "openai", apiKey: "${OPENAI_KEY}" },
-            { name: "anthropic", apiKey: "${ANTHROPIC_KEY}" },
-          ],
-        },
-        { OPENAI_KEY: "sk-xxx", ANTHROPIC_KEY: "sk-yyy" },
-      );
-      expect(result).toEqual({
-        providers: [
-          { name: "openai", apiKey: "sk-xxx" },
-          { name: "anthropic", apiKey: "sk-yyy" },
-        ],
-      });
-    });
+  }
+  expect(getAuthoredConfigSecretRef(config, "resolved")).toBeNull();
+  expect(getResolvedConfigEnvSecretRef(config, "resolved")).toEqual({
+    source: "env",
+    provider: "default",
+    id: "RESOLVED_SECRET",
   });
+});
 
-  describe("missing env var handling", () => {
-    it("throws MissingEnvVarError for missing env var", () => {
-      expect(() => resolveConfigEnvVars({ key: "${MISSING}" }, {})).toThrow(MissingEnvVarError);
-    });
-
-    it("includes var name in error", () => {
-      try {
-        resolveConfigEnvVars({ key: "${MISSING_VAR}" }, {});
-        throw new Error("Expected to throw");
-      } catch (err) {
-        expect(err).toBeInstanceOf(MissingEnvVarError);
-        const error = err as MissingEnvVarError;
-        expect(error.varName).toBe("MISSING_VAR");
-      }
-    });
-
-    it("includes config path in error", () => {
-      try {
-        resolveConfigEnvVars({ outer: { inner: { key: "${MISSING}" } } }, {});
-        throw new Error("Expected to throw");
-      } catch (err) {
-        expect(err).toBeInstanceOf(MissingEnvVarError);
-        const error = err as MissingEnvVarError;
-        expect(error.configPath).toBe("outer.inner.key");
-      }
-    });
-
-    it("includes array index in config path", () => {
-      try {
-        resolveConfigEnvVars({ items: ["ok", "${MISSING}"] }, { OK: "val" });
-        throw new Error("Expected to throw");
-      } catch (err) {
-        expect(err).toBeInstanceOf(MissingEnvVarError);
-        const error = err as MissingEnvVarError;
-        expect(error.configPath).toBe("items[1]");
-      }
-    });
-
-    it("treats empty string env var as missing", () => {
-      expect(() => resolveConfigEnvVars({ key: "${EMPTY}" }, { EMPTY: "" })).toThrow(
-        MissingEnvVarError,
-      );
-    });
-  });
-
-  describe("escape syntax", () => {
-    it("outputs literal ${VAR} when escaped with $$", () => {
-      const result = resolveConfigEnvVars({ key: "$${VAR}" }, { VAR: "value" });
-      expect(result).toEqual({ key: "${VAR}" });
-    });
-
-    it("handles mix of escaped and unescaped", () => {
-      const result = resolveConfigEnvVars({ key: "${REAL}/$${LITERAL}" }, { REAL: "resolved" });
-      expect(result).toEqual({ key: "resolved/${LITERAL}" });
-    });
-
-    it("handles escaped and unescaped of the same var (escaped first)", () => {
-      const result = resolveConfigEnvVars({ key: "$${FOO} ${FOO}" }, { FOO: "bar" });
-      expect(result).toEqual({ key: "${FOO} bar" });
-    });
-
-    it("handles escaped and unescaped of the same var (unescaped first)", () => {
-      const result = resolveConfigEnvVars({ key: "${FOO} $${FOO}" }, { FOO: "bar" });
-      expect(result).toEqual({ key: "bar ${FOO}" });
-    });
-
-    it("handles multiple escaped vars", () => {
-      const result = resolveConfigEnvVars({ key: "$${A}:$${B}" }, {});
-      expect(result).toEqual({ key: "${A}:${B}" });
-    });
-
-    it("does not unescape $${VAR} sequences from env values", () => {
-      const result = resolveConfigEnvVars({ key: "${FOO}" }, { FOO: "$${BAR}" });
-      expect(result).toEqual({ key: "$${BAR}" });
-    });
-  });
-
-  describe("non-matching patterns unchanged", () => {
-    it("leaves $VAR (no braces) unchanged", () => {
-      const result = resolveConfigEnvVars({ key: "$VAR" }, { VAR: "value" });
-      expect(result).toEqual({ key: "$VAR" });
-    });
-
-    it("leaves ${lowercase} unchanged (uppercase only)", () => {
-      const result = resolveConfigEnvVars({ key: "${lowercase}" }, { lowercase: "value" });
-      expect(result).toEqual({ key: "${lowercase}" });
-    });
-
-    it("leaves ${MixedCase} unchanged", () => {
-      const result = resolveConfigEnvVars({ key: "${MixedCase}" }, { MixedCase: "value" });
-      expect(result).toEqual({ key: "${MixedCase}" });
-    });
-
-    it("leaves ${123INVALID} unchanged (must start with letter or underscore)", () => {
-      const result = resolveConfigEnvVars({ key: "${123INVALID}" }, {});
-      expect(result).toEqual({ key: "${123INVALID}" });
-    });
-
-    it("substitutes ${_UNDERSCORE_START} (valid)", () => {
-      const result = resolveConfigEnvVars(
-        { key: "${_UNDERSCORE_START}" },
-        { _UNDERSCORE_START: "valid" },
-      );
-      expect(result).toEqual({ key: "valid" });
-    });
-
-    it("substitutes ${VAR_WITH_NUMBERS_123} (valid)", () => {
-      const result = resolveConfigEnvVars(
-        { key: "${VAR_WITH_NUMBERS_123}" },
-        { VAR_WITH_NUMBERS_123: "valid" },
-      );
-      expect(result).toEqual({ key: "valid" });
-    });
-  });
-
-  describe("passthrough behavior", () => {
-    it("passes through primitives unchanged", () => {
-      expect(resolveConfigEnvVars("hello", {})).toBe("hello");
-      expect(resolveConfigEnvVars(42, {})).toBe(42);
-      expect(resolveConfigEnvVars(true, {})).toBe(true);
-      expect(resolveConfigEnvVars(null, {})).toBe(null);
-    });
-
-    it("passes through empty object", () => {
-      expect(resolveConfigEnvVars({}, {})).toEqual({});
-    });
-
-    it("passes through empty array", () => {
-      expect(resolveConfigEnvVars([], {})).toEqual([]);
-    });
-
-    it("passes through non-string values in objects", () => {
-      const result = resolveConfigEnvVars({ num: 42, bool: true, nil: null, arr: [1, 2] }, {});
-      expect(result).toEqual({ num: 42, bool: true, nil: null, arr: [1, 2] });
-    });
-  });
-
-  describe("real-world config patterns", () => {
-    it("substitutes API keys in provider config", () => {
-      const config = {
-        models: {
-          providers: {
-            "vercel-gateway": {
-              apiKey: "${VERCEL_GATEWAY_API_KEY}",
-            },
-            openai: {
-              apiKey: "${OPENAI_API_KEY}",
-            },
-          },
-        },
-      };
-      const env = {
-        VERCEL_GATEWAY_API_KEY: "vg_key_123",
-        OPENAI_API_KEY: "sk-xxx",
-      };
-      const result = resolveConfigEnvVars(config, env);
-      expect(result).toEqual({
-        models: {
-          providers: {
-            "vercel-gateway": {
-              apiKey: "vg_key_123",
-            },
-            openai: {
-              apiKey: "sk-xxx",
-            },
-          },
-        },
-      });
-    });
-
-    it("substitutes gateway auth token", () => {
-      const config = {
-        gateway: {
-          auth: {
-            token: "${OPENCLAW_GATEWAY_TOKEN}",
-          },
-        },
-      };
-      const result = resolveConfigEnvVars(config, {
-        OPENCLAW_GATEWAY_TOKEN: "secret-token",
-      });
-      expect(result).toEqual({
-        gateway: {
-          auth: {
-            token: "secret-token",
-          },
-        },
-      });
-    });
-
-    it("substitutes base URL with env var", () => {
-      const config = {
-        models: {
-          providers: {
-            custom: {
-              baseUrl: "${CUSTOM_API_BASE}/v1",
-            },
-          },
-        },
-      };
-      const result = resolveConfigEnvVars(config, {
-        CUSTOM_API_BASE: "https://api.example.com",
-      });
-      expect(result).toEqual({
-        models: {
-          providers: {
-            custom: {
-              baseUrl: "https://api.example.com/v1",
-            },
-          },
-        },
-      });
-    });
-  });
+it("detects only unescaped supported env references", () => {
+  const cases: Array<[boolean, string[]]> = [
+    [
+      true,
+      [
+        "${FOO}",
+        "prefix-${VAR}-suffix",
+        "${A}/${B}",
+        "${_UNDERSCORE}",
+        "${VAR_WITH_123}",
+        "$${ESCAPED} ${REAL}",
+        "${REAL} $${ESCAPED}",
+        "${VAR:-x}",
+        "prefix-${VAR:-x}",
+        "${VAR:-}",
+      ],
+    ],
+    [
+      false,
+      [
+        "no-refs-here",
+        "$VAR",
+        "${lowercase}",
+        "${MixedCase}",
+        "${123INVALID}",
+        "",
+        "$${ESCAPED}",
+        "prefix-$${ESCAPED}-suffix",
+        "$${VAR:-x}",
+        "${VAR:=x}",
+        "${VAR-x}",
+        "${lowercase:-x}",
+      ],
+    ],
+  ];
+  for (const [expected, inputs] of cases) {
+    for (const input of inputs) {
+      expect(containsEnvVarReference(input), input).toBe(expected);
+    }
+  }
 });

@@ -1,5 +1,13 @@
-# mattermost 目錄索引
+# Mattermost OpenClaw channel
 
-### 子目錄
+Official OpenClaw channel plugin for Mattermost.
 
-- [src](src/README.md)
+## Install
+
+```sh
+openclaw plugins install @openclaw/mattermost
+```
+
+## Docs
+
+See `docs/channels/mattermost.md` in the OpenClaw repository, or the published docs at `https://docs.openclaw.ai/channels/mattermost`.

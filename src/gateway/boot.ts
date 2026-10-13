@@ -1,13 +1,28 @@
+// Gateway BOOT.md runner.
+// Runs per-workspace boot checks in a run-owned temporary session.
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { CliDeps } from "../cli/deps.js";
-import type { OpenClawConfig } from "../config/config.js";
+import { readRegularFile } from "@openclaw/fs-safe/advanced";
+import {
+  escapeInternalRuntimeContextDelimiters,
+  type RuntimeContextFragment,
+} from "../agents/internal-runtime-context.js";
 import { SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
-import { agentCommand } from "../commands/agent.js";
-import { resolveMainSessionKey } from "../config/sessions/main-session.js";
+import type { CliDeps } from "../cli/deps.types.js";
+import { agentCommandFromSystem } from "../commands/agent.js";
+import {
+  resolveAgentIdFromSessionKey,
+  resolveAgentMainSessionKey,
+  resolveMainSessionKey,
+} from "../config/sessions/main-session.js";
+import { resolveSessionStorePathCore } from "../config/sessions/paths.js";
+import { applySessionEntryLifecycleMutation } from "../config/sessions/session-accessor.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { formatErrorMessage } from "../infra/errors.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { type RuntimeEnv, defaultRuntime } from "../runtime.js";
+import { clearBootEchoContextForSession, setBootEchoContextForSession } from "./boot-echo-guard.js";
 
 function generateBootSessionId(): string {
   const now = new Date();
@@ -19,36 +34,55 @@ function generateBootSessionId(): string {
 const log = createSubsystemLogger("gateway/boot");
 const BOOT_FILENAME = "BOOT.md";
 
-export type BootRunResult =
+/** Result of attempting to run a workspace BOOT.md check. */
+type BootRunResult =
   | { status: "skipped"; reason: "missing" | "empty" }
   | { status: "ran" }
   | { status: "failed"; reason: string };
 
 function buildBootPrompt(content: string) {
-  return [
-    "You are running a boot check. Follow BOOT.md instructions exactly.",
-    "",
-    "BOOT.md:",
-    content,
-    "",
-    "If BOOT.md asks you to send a message, use the message tool (action=send with channel + target).",
-    "Use the `target` field (not `to`) for message tool destinations.",
-    `After sending with the message tool, reply with ONLY: ${SILENT_REPLY_TOKEN}.`,
-    `If nothing needs attention, reply with ONLY: ${SILENT_REPLY_TOKEN}.`,
-  ].join("\n");
+  const safeContent = escapeInternalRuntimeContextDelimiters(content);
+  const runtimeContextFragments: RuntimeContextFragment[] = [
+    {
+      kind: "runtime-instruction",
+      text: "You are running a boot check. Follow BOOT.md instructions exactly.",
+    },
+    { kind: "runtime-instruction", text: `BOOT.md:\n${safeContent}` },
+    {
+      kind: "runtime-instruction",
+      text: [
+        "If BOOT.md asks you to send a message, use the message tool (action=send with channel + target).",
+        "Use the `target` field (not `to`) for message tool destinations.",
+        `After sending with the message tool, reply with ONLY: ${SILENT_REPLY_TOKEN}.`,
+        `If nothing needs attention, reply with ONLY: ${SILENT_REPLY_TOKEN}.`,
+      ].join("\n"),
+    },
+  ];
+  return {
+    message: "Run the workspace boot check now.",
+    runtimeContextFragments,
+    echoContext: runtimeContextFragments.map((fragment) => fragment.text).join("\n\n"),
+  };
 }
+
+const MAX_BOOT_FILE_BYTES = 16 * 1024 * 1024;
 
 async function loadBootFile(
   workspaceDir: string,
-): Promise<{ content?: string; status: "ok" | "missing" | "empty" }> {
+): Promise<{ content: string; status: "ok" } | { status: "missing" | "empty" }> {
   const bootPath = path.join(workspaceDir, BOOT_FILENAME);
+
+  // Resolve symlinks so BOOT.md can be a readable symlink to a regular file
+  // while keeping directory/permission/size-limit failures surfaced to the
+  // operator. ENOENT from either resolution or the bounded open keeps the
+  // established readFile contract: treat disappearance as missing.
+  let buffer: Buffer;
   try {
-    const content = await fs.readFile(bootPath, "utf-8");
-    const trimmed = content.trim();
-    if (!trimmed) {
-      return { status: "empty" };
-    }
-    return { status: "ok", content: trimmed };
+    const resolvedPath = await fs.realpath(bootPath);
+    ({ buffer } = await readRegularFile({
+      filePath: resolvedPath,
+      maxBytes: MAX_BOOT_FILE_BYTES,
+    }));
   } catch (err) {
     const anyErr = err as { code?: string };
     if (anyErr.code === "ENOENT") {
@@ -56,12 +90,15 @@ async function loadBootFile(
     }
     throw err;
   }
+  const content = buffer.toString("utf-8").trim();
+  return content ? { status: "ok", content } : { status: "empty" };
 }
 
 export async function runBootOnce(params: {
   cfg: OpenClawConfig;
   deps: CliDeps;
   workspaceDir: string;
+  agentId?: string;
 }): Promise<BootRunResult> {
   const bootRuntime: RuntimeEnv = {
     log: () => {},
@@ -72,34 +109,74 @@ export async function runBootOnce(params: {
   try {
     result = await loadBootFile(params.workspaceDir);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = formatErrorMessage(err);
     log.error(`boot: failed to read ${BOOT_FILENAME}: ${message}`);
     return { status: "failed", reason: message };
   }
 
-  if (result.status === "missing" || result.status === "empty") {
+  if (result.status !== "ok") {
     return { status: "skipped", reason: result.status };
   }
 
-  const sessionKey = resolveMainSessionKey(params.cfg);
-  const message = buildBootPrompt(result.content ?? "");
+  const mainSessionKey = params.agentId
+    ? resolveAgentMainSessionKey({ cfg: params.cfg, agentId: params.agentId })
+    : resolveMainSessionKey(params.cfg);
+  const bootPrompt = buildBootPrompt(result.content);
   const sessionId = generateBootSessionId();
-
+  const agentId = resolveAgentIdFromSessionKey(mainSessionKey);
+  // A run-owned key avoids rebinding a retained boot session, which would reject
+  // admission or discard its collaboration state when the session ID rotates.
+  const sessionKey = `agent:${agentId}:boot:${sessionId}`;
+  const storePath = resolveSessionStorePathCore(params.cfg.session?.store, { agentId });
+  let ownedSessionId = sessionId;
+  let agentFailure: string | undefined;
+  let cleanupFailure: string | undefined;
+  // Message tools use this exact run key to suppress unwrapped BOOT.md echoes.
+  setBootEchoContextForSession(sessionKey, bootPrompt.echoContext);
   try {
-    await agentCommand(
+    await agentCommandFromSystem(
       {
-        message,
+        message: bootPrompt.message,
+        runtimeContextFragments: bootPrompt.runtimeContextFragments,
         sessionKey,
         sessionId,
         deliver: false,
+        suppressPromptPersistence: true,
+        onSessionIdChanged: (nextSessionId) => {
+          ownedSessionId = nextSessionId;
+        },
       },
+      { boundary: "gateway.boot" },
       bootRuntime,
       params.deps,
     );
-    return { status: "ran" };
   } catch (err) {
-    const messageText = err instanceof Error ? err.message : String(err);
-    log.error(`boot: agent run failed: ${messageText}`);
-    return { status: "failed", reason: messageText };
+    agentFailure = formatErrorMessage(err);
+    log.error(`boot: agent run failed: ${agentFailure}`);
+  } finally {
+    clearBootEchoContextForSession(sessionKey);
+    try {
+      await applySessionEntryLifecycleMutation({
+        agentId,
+        storePath,
+        // Follow committed run rotations, but preserve an operator's replacement.
+        removals: [
+          { sessionKey, expectedSessionId: ownedSessionId, archiveRemovedTranscript: false },
+        ],
+        skipMaintenance: true,
+      });
+    } catch (err) {
+      cleanupFailure = formatErrorMessage(err);
+      log.error(`boot: failed to clean up session: ${cleanupFailure}`);
+    }
   }
+
+  if (!agentFailure && !cleanupFailure) {
+    return { status: "ran" };
+  }
+  const reasonParts = [
+    agentFailure ? `agent run failed: ${agentFailure}` : undefined,
+    cleanupFailure ? `session cleanup failed: ${cleanupFailure}` : undefined,
+  ].filter((part): part is string => Boolean(part));
+  return { status: "failed", reason: reasonParts.join("; ") };
 }

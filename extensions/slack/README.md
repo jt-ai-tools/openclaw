@@ -1,5 +1,11 @@
-# slack 目錄索引
+# OpenClaw Slack
 
-### 子目錄
+Official OpenClaw channel plugin for Slack channels, DMs, commands, and app events.
 
-- [src](src/README.md)
+Install from OpenClaw:
+
+```bash
+openclaw plugins install @openclaw/slack
+```
+
+Configure the Slack app credentials and allowed workspaces/channels in OpenClaw. The plugin lets agents receive Slack events and reply through the configured Slack app.

@@ -1,242 +1,106 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { OpenClawConfig } from "../../config/config.js";
-import { slackPlugin } from "../../../extensions/slack/src/channel.js";
-import { telegramPlugin } from "../../../extensions/telegram/src/channel.js";
-import { setActivePluginRegistry } from "../../plugins/runtime.js";
-import { createTestRegistry } from "../../test-utils/channel-plugins.js";
+import { describe, expect, it, vi } from "vitest";
+import {
+  resolveAndApplyOutboundReplyToId,
+  resolveAndApplyOutboundThreadId,
+} from "./message-action-threading.js";
 
-const mocks = vi.hoisted(() => ({
-  executeSendAction: vi.fn(),
-  recordSessionMetaFromInbound: vi.fn(async () => ({ ok: true })),
-}));
-
-vi.mock("./outbound-send-service.js", async () => {
-  const actual = await vi.importActual<typeof import("./outbound-send-service.js")>(
-    "./outbound-send-service.js",
-  );
-  return {
-    ...actual,
-    executeSendAction: mocks.executeSendAction,
-  };
-});
-
-vi.mock("../../config/sessions.js", async () => {
-  const actual = await vi.importActual<typeof import("../../config/sessions.js")>(
-    "../../config/sessions.js",
-  );
-  return {
-    ...actual,
-    recordSessionMetaFromInbound: mocks.recordSessionMetaFromInbound,
-  };
-});
-
-import { runMessageAction } from "./message-action-runner.js";
-
-const slackConfig = {
-  channels: {
-    slack: {
-      botToken: "xoxb-test",
-      appToken: "xapp-test",
-    },
+const threadContext = {
+  cfg: {},
+  to: "forum:123",
+  toolContext: { currentChannelId: "forum:123", currentThreadTs: "42" },
+};
+const replyContext = {
+  channel: "workspace",
+  toolContext: {
+    currentChannelId: "channel:C123",
+    currentMessageId: "msg-42",
+    replyToMode: "all",
   },
-} as OpenClawConfig;
+} satisfies Parameters<typeof resolveAndApplyOutboundReplyToId>[1];
 
-const telegramConfig = {
-  channels: {
-    telegram: {
-      botToken: "telegram-test",
-    },
-  },
-} as OpenClawConfig;
-
-describe("runMessageAction threading auto-injection", () => {
-  beforeEach(async () => {
-    const { createPluginRuntime } = await import("../../plugins/runtime/index.js");
-    const { setSlackRuntime } = await import("../../../extensions/slack/src/runtime.js");
-    const { setTelegramRuntime } = await import("../../../extensions/telegram/src/runtime.js");
-    const runtime = createPluginRuntime();
-    setSlackRuntime(runtime);
-    setTelegramRuntime(runtime);
-    setActivePluginRegistry(
-      createTestRegistry([
-        {
-          pluginId: "slack",
-          source: "test",
-          plugin: slackPlugin,
-        },
-        {
-          pluginId: "telegram",
-          source: "test",
-          plugin: telegramPlugin,
-        },
-      ]),
+describe("message action threading helpers", () => {
+  it("skips auto-threading for an explicit null threadId", () => {
+    const resolveAutoThreadId = vi.fn(() => "42");
+    const resolved = resolveAndApplyOutboundThreadId(
+      { threadId: null },
+      { ...threadContext, resolveAutoThreadId },
     );
+
+    expect(resolved).toBeUndefined();
+    expect(resolveAutoThreadId).not.toHaveBeenCalled();
   });
 
-  afterEach(() => {
-    setActivePluginRegistry(createTestRegistry([]));
-    mocks.executeSendAction.mockReset();
-    mocks.recordSessionMetaFromInbound.mockReset();
-  });
-
-  it("uses toolContext thread when auto-threading is active", async () => {
-    mocks.executeSendAction.mockResolvedValue({
-      handledBy: "plugin",
-      payload: {},
-    });
-
-    await runMessageAction({
-      cfg: slackConfig,
-      action: "send",
-      params: {
-        channel: "slack",
-        target: "channel:C123",
-        message: "hi",
-      },
+  it("inherits replies for routable target aliases", () => {
+    const actionParams: Record<string, unknown> = { to: "user:U123" };
+    const resolved = resolveAndApplyOutboundReplyToId(actionParams, {
+      channel: "slack",
       toolContext: {
-        currentChannelId: "C123",
-        currentThreadTs: "111.222",
-        replyToMode: "all",
+        ...replyContext.toolContext,
+        currentChannelId: "D123",
+        currentMessagingTarget: "user:U123",
       },
-      agentId: "main",
     });
 
-    const call = mocks.executeSendAction.mock.calls[0]?.[0];
-    expect(call?.ctx?.mirror?.sessionKey).toBe("agent:main:slack:channel:c123:thread:111.222");
+    expect(resolved).toEqual({ replyToId: "msg-42", source: "implicit", mode: "all" });
+    expect(actionParams.replyTo).toBe("msg-42");
   });
 
-  it("matches auto-threading when channel ids differ in case", async () => {
-    mocks.executeSendAction.mockResolvedValue({
-      handledBy: "plugin",
-      payload: {},
-    });
-
-    await runMessageAction({
-      cfg: slackConfig,
-      action: "send",
-      params: {
-        channel: "slack",
-        target: "channel:c123",
-        message: "hi",
-      },
-      toolContext: {
-        currentChannelId: "C123",
-        currentThreadTs: "333.444",
-        replyToMode: "all",
-      },
-      agentId: "main",
-    });
-
-    const call = mocks.executeSendAction.mock.calls[0]?.[0];
-    expect(call?.ctx?.mirror?.sessionKey).toBe("agent:main:slack:channel:c123:thread:333.444");
+  it("skips inherited reply ids for explicit top-level sends", () => {
+    const actionParams: Record<string, unknown> = { target: "channel:C123", topLevel: true };
+    expect(resolveAndApplyOutboundReplyToId(actionParams, replyContext)).toBeUndefined();
+    expect(actionParams.replyTo).toBeUndefined();
   });
 
-  it("auto-injects telegram threadId from toolContext when omitted", async () => {
-    mocks.executeSendAction.mockResolvedValue({
-      handledBy: "plugin",
-      payload: {},
-    });
-
-    await runMessageAction({
-      cfg: telegramConfig,
-      action: "send",
-      params: {
-        channel: "telegram",
-        target: "telegram:123",
-        message: "hi",
-      },
+  it("consumes batched replies once for normalized aliases", () => {
+    const hasRepliedRef = { value: false };
+    const matchesToolContextTarget = vi.fn(({ target }: { target: string }) => target === "U123");
+    const context = {
+      channel: "slack",
       toolContext: {
-        currentChannelId: "telegram:123",
-        currentThreadTs: "42",
+        currentChannelId: "D123",
+        currentMessagingTarget: "user:U123",
+        currentMessageId: "msg-42",
+        replyToMode: "batched",
+        hasRepliedRef,
       },
-      agentId: "main",
-    });
+      matchesToolContextTarget,
+    } satisfies Parameters<typeof resolveAndApplyOutboundReplyToId>[1];
+    const actionParams: Record<string, unknown> = { target: "U123" };
 
-    const call = mocks.executeSendAction.mock.calls[0]?.[0] as {
-      ctx?: { params?: Record<string, unknown> };
-    };
-    expect(call?.ctx?.params?.threadId).toBe("42");
+    expect(resolveAndApplyOutboundReplyToId(actionParams, context)).toEqual({
+      replyToId: "msg-42",
+      source: "implicit",
+      mode: "first",
+    });
+    expect(actionParams.replyTo).toBe("msg-42");
+    expect(resolveAndApplyOutboundReplyToId({ target: "U123" }, context)).toBeUndefined();
+    expect(hasRepliedRef.value).toBe(true);
+    expect(matchesToolContextTarget).toHaveBeenCalledTimes(2);
   });
 
-  it("skips telegram auto-threading when target chat differs", async () => {
-    mocks.executeSendAction.mockResolvedValue({
-      handledBy: "plugin",
-      payload: {},
-    });
+  it("consumes first-mode for explicit replies", () => {
+    const hasRepliedRef = { value: false };
+    const context = {
+      ...replyContext,
+      toolContext: { ...replyContext.toolContext, replyToMode: "first", hasRepliedRef },
+    } satisfies Parameters<typeof resolveAndApplyOutboundReplyToId>[1];
 
-    await runMessageAction({
-      cfg: telegramConfig,
-      action: "send",
-      params: {
-        channel: "telegram",
-        target: "telegram:999",
-        message: "hi",
-      },
-      toolContext: {
-        currentChannelId: "telegram:123",
-        currentThreadTs: "42",
-      },
-      agentId: "main",
+    expect(resolveAndApplyOutboundReplyToId({ replyTo: "explicit-1" }, context)).toEqual({
+      replyToId: "explicit-1",
+      source: "explicit",
     });
-
-    const call = mocks.executeSendAction.mock.calls[0]?.[0] as {
-      ctx?: { params?: Record<string, unknown> };
-    };
-    expect(call?.ctx?.params?.threadId).toBeUndefined();
+    expect(resolveAndApplyOutboundReplyToId({ target: "channel:C123" }, context)).toBeUndefined();
+    expect(hasRepliedRef.value).toBe(true);
   });
 
-  it("matches telegram target with internal prefix variations", async () => {
-    mocks.executeSendAction.mockResolvedValue({
-      handledBy: "plugin",
-      payload: {},
+  it("isolates replies across providers with matching target IDs", () => {
+    const actionParams: Record<string, unknown> = { target: "channel:C123" };
+    const resolved = resolveAndApplyOutboundReplyToId(actionParams, {
+      channel: "discord",
+      toolContext: { ...replyContext.toolContext, currentChannelProvider: "slack" },
     });
 
-    await runMessageAction({
-      cfg: telegramConfig,
-      action: "send",
-      params: {
-        channel: "telegram",
-        target: "telegram:group:123",
-        message: "hi",
-      },
-      toolContext: {
-        currentChannelId: "telegram:123",
-        currentThreadTs: "42",
-      },
-      agentId: "main",
-    });
-
-    const call = mocks.executeSendAction.mock.calls[0]?.[0] as {
-      ctx?: { params?: Record<string, unknown> };
-    };
-    expect(call?.ctx?.params?.threadId).toBe("42");
-  });
-
-  it("uses explicit telegram threadId when provided", async () => {
-    mocks.executeSendAction.mockResolvedValue({
-      handledBy: "plugin",
-      payload: {},
-    });
-
-    await runMessageAction({
-      cfg: telegramConfig,
-      action: "send",
-      params: {
-        channel: "telegram",
-        target: "telegram:123",
-        message: "hi",
-        threadId: "999",
-      },
-      toolContext: {
-        currentChannelId: "telegram:123",
-        currentThreadTs: "42",
-      },
-      agentId: "main",
-    });
-
-    const call = mocks.executeSendAction.mock.calls[0]?.[0] as {
-      ctx?: { params?: Record<string, unknown> };
-    };
-    expect(call?.ctx?.params?.threadId).toBe("999");
+    expect(resolved).toBeUndefined();
+    expect(actionParams.replyTo).toBeUndefined();
   });
 });

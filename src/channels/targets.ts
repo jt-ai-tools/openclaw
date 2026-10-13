@@ -1,5 +1,8 @@
-export type { DirectoryConfigParams } from "./plugins/directory-config.js";
-export type { ChannelDirectoryEntry } from "./plugins/types.js";
+/**
+ * Shared messaging-target parsing primitives for channel plugins and SDK consumers.
+ * Channel-specific grammars stay in plugins; this file owns common target shapes and parse order.
+ */
+import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 
 export type MessagingTargetKind = "user" | "channel";
 
@@ -15,10 +18,6 @@ export type MessagingTargetParseOptions = {
   ambiguousMessage?: string;
 };
 
-export function normalizeTargetId(kind: MessagingTargetKind, id: string): string {
-  return `${kind}:${id}`.toLowerCase();
-}
-
 export function buildMessagingTarget(
   kind: MessagingTargetKind,
   id: string,
@@ -28,7 +27,7 @@ export function buildMessagingTarget(
     kind,
     id,
     raw,
-    normalized: normalizeTargetId(kind, id),
+    normalized: normalizeLowercaseStringOrEmpty(`${kind}:${id}`),
   };
 }
 
@@ -41,6 +40,37 @@ export function ensureTargetId(params: {
     throw new Error(params.errorMessage);
   }
   return params.candidate;
+}
+
+/** Tries mention, explicit prefixes, then @user shorthand in deterministic order. */
+export function parseMentionPrefixOrAtUserTarget(params: {
+  raw: string;
+  mentionPattern: RegExp;
+  prefixes: Array<{ prefix: string; kind: MessagingTargetKind }>;
+  atUserPattern: RegExp;
+  atUserErrorMessage: string;
+}): MessagingTarget | undefined {
+  const match = params.raw.match(params.mentionPattern);
+  if (match?.[1]) {
+    return buildMessagingTarget("user", match[1], params.raw);
+  }
+  for (const { prefix, kind } of params.prefixes) {
+    if (params.raw.startsWith(prefix)) {
+      const id = params.raw.slice(prefix.length).trim();
+      if (id) {
+        return buildMessagingTarget(kind, id, params.raw);
+      }
+    }
+  }
+  if (!params.raw.startsWith("@")) {
+    return undefined;
+  }
+  const id = ensureTargetId({
+    candidate: params.raw.slice(1).trim(),
+    pattern: params.atUserPattern,
+    errorMessage: params.atUserErrorMessage,
+  });
+  return buildMessagingTarget("user", id, params.raw);
 }
 
 export function requireTargetKind(params: {

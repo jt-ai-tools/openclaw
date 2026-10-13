@@ -1,166 +1,120 @@
-import fs from "node:fs/promises";
-import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { OpenClawConfig } from "../config/config.js";
-import { withTempHome as withTempHomeBase } from "../../test/helpers/temp-home.js";
+// Verifies GitHub Copilot profile token fallback and implicit provider planning.
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { planModelsJsonForTest } from "./models-config.plan.test-support.js";
+import { resolveImplicitProviders } from "./models-config.providers.js";
+import { createProviderAuthResolver } from "./models-config.providers.secrets.js";
 
-async function withTempHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
-  return withTempHomeBase(fn, { prefix: "openclaw-models-" });
-}
+vi.mock("./model-auth-env.js", () => ({
+  resolveEnvApiKey: () => null,
+}));
 
-const _MODELS_CONFIG: OpenClawConfig = {
-  models: {
-    providers: {
-      "custom-proxy": {
-        baseUrl: "http://localhost:4000/v1",
-        apiKey: "TEST_KEY",
-        api: "openai-completions",
-        models: [
-          {
-            id: "llama-3.1-8b",
-            name: "Llama 3.1 8B (Proxy)",
-            api: "openai-completions",
-            reasoning: false,
-            input: ["text"],
-            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-            contextWindow: 128000,
-            maxTokens: 32000,
-          },
-        ],
-      },
-    },
-  },
-};
+vi.mock("./provider-auth-aliases.js", () => ({
+  resolveProviderAuthAliasMap: () => ({}),
+  resolveProviderIdForAuth: (provider: string) => provider.trim().toLowerCase(),
+}));
+
+vi.mock("./model-auth-env-vars.js", () => ({
+  listKnownProviderEnvApiKeyNames: () => [],
+  resolveProviderEnvAuthLookupMaps: () => ({
+    aliasMap: {},
+    envCandidateMap: {},
+    authEvidenceMap: {},
+  }),
+}));
+
+vi.mock("../plugins/provider-runtime.js", () => ({
+  resolveProviderSyntheticAuthWithPlugin: () => undefined,
+}));
+
+vi.mock("./models-config.providers.js", () => ({
+  materializeConfiguredProviderCatalogModels: (providers: unknown) => providers,
+  enforceSourceManagedProviderSecrets: ({ providers }: { providers: unknown }) => providers,
+  normalizeProviderCatalogModelsForConfig: (providers: unknown) => providers,
+  normalizeProviders: ({ providers }: { providers: unknown }) => providers,
+  resolveImplicitProviders: vi.fn(),
+}));
+
+const resolveImplicitProvidersMock = vi.mocked(resolveImplicitProviders);
+
+beforeEach(() => {
+  resolveImplicitProvidersMock
+    .mockReset()
+    .mockImplementation(async ({ explicitProviders }) => explicitProviders ?? {});
+});
 
 describe("models-config", () => {
-  let previousHome: string | undefined;
+  it("uses the first github-copilot profile when env tokens are missing", () => {
+    const auth = createProviderAuthResolver(
+      {},
+      {
+        version: 1,
+        profiles: {
+          "github-copilot:alpha": {
+            type: "token",
+            provider: "github-copilot",
+            token: "alpha-token",
+          },
+          "github-copilot:beta": {
+            type: "token",
+            provider: "github-copilot",
+            token: "beta-token",
+          },
+        },
+      },
+    );
 
-  beforeEach(() => {
-    previousHome = process.env.HOME;
-  });
-
-  afterEach(() => {
-    process.env.HOME = previousHome;
-  });
-
-  it("uses the first github-copilot profile when env tokens are missing", async () => {
-    await withTempHome(async (home) => {
-      const previous = process.env.COPILOT_GITHUB_TOKEN;
-      const previousGh = process.env.GH_TOKEN;
-      const previousGithub = process.env.GITHUB_TOKEN;
-      delete process.env.COPILOT_GITHUB_TOKEN;
-      delete process.env.GH_TOKEN;
-      delete process.env.GITHUB_TOKEN;
-
-      try {
-        vi.resetModules();
-
-        const agentDir = path.join(home, "agent-profiles");
-        await fs.mkdir(agentDir, { recursive: true });
-        await fs.writeFile(
-          path.join(agentDir, "auth-profiles.json"),
-          JSON.stringify(
-            {
-              version: 1,
-              profiles: {
-                "github-copilot:alpha": {
-                  type: "token",
-                  provider: "github-copilot",
-                  token: "alpha-token",
-                },
-                "github-copilot:beta": {
-                  type: "token",
-                  provider: "github-copilot",
-                  token: "beta-token",
-                },
-              },
-            },
-            null,
-            2,
-          ),
-        );
-
-        const resolveCopilotApiToken = vi.fn().mockResolvedValue({
-          token: "copilot",
-          expiresAt: Date.now() + 60 * 60 * 1000,
-          source: "mock",
-          baseUrl: "https://api.copilot.example",
-        });
-
-        vi.doMock("../providers/github-copilot-token.js", () => ({
-          DEFAULT_COPILOT_API_BASE_URL: "https://api.individual.githubcopilot.com",
-          resolveCopilotApiToken,
-        }));
-
-        const { ensureOpenClawModelsJson } = await import("./models-config.js");
-
-        await ensureOpenClawModelsJson({ models: { providers: {} } }, agentDir);
-
-        expect(resolveCopilotApiToken).toHaveBeenCalledWith(
-          expect.objectContaining({ githubToken: "alpha-token" }),
-        );
-      } finally {
-        if (previous === undefined) {
-          delete process.env.COPILOT_GITHUB_TOKEN;
-        } else {
-          process.env.COPILOT_GITHUB_TOKEN = previous;
-        }
-        if (previousGh === undefined) {
-          delete process.env.GH_TOKEN;
-        } else {
-          process.env.GH_TOKEN = previousGh;
-        }
-        if (previousGithub === undefined) {
-          delete process.env.GITHUB_TOKEN;
-        } else {
-          process.env.GITHUB_TOKEN = previousGithub;
-        }
-      }
+    expect(auth("github-copilot")).toEqual({
+      apiKey: "alpha-token",
+      discoveryApiKey: "alpha-token",
+      mode: "token",
+      source: "profile",
+      profileId: "github-copilot:alpha",
     });
   });
-  it("does not override explicit github-copilot provider config", async () => {
-    await withTempHome(async () => {
-      const previous = process.env.COPILOT_GITHUB_TOKEN;
-      process.env.COPILOT_GITHUB_TOKEN = "gh-token";
 
-      try {
-        vi.resetModules();
+  it("keeps a non-empty existing models.json baseUrl when merge mode regenerates the provider", async () => {
+    const kilocodeProvider = {
+      baseUrl: "https://api.kilo.ai/api/gateway/v1",
+      api: "openai-completions" as const,
+      models: [],
+    };
+    const existing = {
+      providers: { kilocode: { ...kilocodeProvider, baseUrl: "https://api.kilo.ai/api/gateway" } },
+    };
+    const plan = await planModelsJsonForTest({
+      cfg: { models: { providers: { kilocode: kilocodeProvider } } },
+      agentDir: "/tmp/openclaw-agent",
+      env: {},
+      existingRaw: `${JSON.stringify(existing, null, 2)}\n`,
+      existingParsed: existing,
+    });
 
-        vi.doMock("../providers/github-copilot-token.js", () => ({
-          DEFAULT_COPILOT_API_BASE_URL: "https://api.individual.githubcopilot.com",
-          resolveCopilotApiToken: vi.fn().mockResolvedValue({
-            token: "copilot",
-            expiresAt: Date.now() + 60 * 60 * 1000,
-            source: "mock",
-            baseUrl: "https://api.copilot.example",
-          }),
-        }));
+    expect(plan).toEqual({ action: "noop", pluginCatalogWrites: {} });
+  });
 
-        const { ensureOpenClawModelsJson } = await import("./models-config.js");
-        const { resolveOpenClawAgentDir } = await import("./agent-paths.js");
-
-        await ensureOpenClawModelsJson({
-          models: {
-            providers: {
-              "github-copilot": {
-                baseUrl: "https://copilot.local",
-                api: "openai-responses",
-                models: [],
-              },
-            },
+  it("uses tokenRef env var when github-copilot profile omits plaintext token", () => {
+    const auth = createProviderAuthResolver(
+      {
+        COPILOT_REF_TOKEN: "token-from-ref-env",
+      },
+      {
+        version: 1,
+        profiles: {
+          "github-copilot:default": {
+            type: "token",
+            provider: "github-copilot",
+            tokenRef: { source: "env", provider: "default", id: "COPILOT_REF_TOKEN" },
           },
-        });
+        },
+      },
+    );
 
-        const agentDir = resolveOpenClawAgentDir();
-        const raw = await fs.readFile(path.join(agentDir, "models.json"), "utf8");
-        const parsed = JSON.parse(raw) as {
-          providers: Record<string, { baseUrl?: string }>;
-        };
-
-        expect(parsed.providers["github-copilot"]?.baseUrl).toBe("https://copilot.local");
-      } finally {
-        process.env.COPILOT_GITHUB_TOKEN = previous;
-      }
+    expect(auth("github-copilot")).toEqual({
+      apiKey: "COPILOT_REF_TOKEN",
+      discoveryApiKey: "token-from-ref-env",
+      mode: "token",
+      source: "profile",
+      profileId: "github-copilot:default",
     });
   });
 });

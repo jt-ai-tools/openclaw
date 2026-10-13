@@ -1,157 +1,224 @@
+// Argv tests cover CLI argument parsing helpers and platform-specific normalization.
 import { describe, expect, it } from "vitest";
 import {
   buildParseArgv,
   getFlagValue,
-  getCommandPath,
-  getPrimaryCommand,
+  getCommandPositionalsWithRootOptions,
   getPositiveIntFlagValue,
   getVerboseFlag,
-  hasHelpOrVersion,
   hasFlag,
-  shouldMigrateState,
-  shouldMigrateStateFromPath,
+  isHelpOrVersionInvocation,
+  isRootVersionInvocation,
+  isSimpleCommandHelpInvocation,
+  normalizeGeneratedHelpCommandArgv,
+  normalizeRootHelpTargetArgv,
+  normalizeRootLogLevelArgv,
+  normalizeRootNoColorArgv,
 } from "./argv.js";
 
 describe("argv helpers", () => {
-  it("detects help/version flags", () => {
-    expect(hasHelpOrVersion(["node", "openclaw", "--help"])).toBe(true);
-    expect(hasHelpOrVersion(["node", "openclaw", "-V"])).toBe(true);
-    expect(hasHelpOrVersion(["node", "openclaw", "status"])).toBe(false);
+  it.each([
+    [
+      "known command group help command short help flag",
+      ["node", "openclaw", "--profile", "work", "backup", "help", "-h"],
+      ["node", "openclaw", "--profile", "work", "backup", "help"],
+    ],
+    [
+      "leaf positional help remains untouched",
+      ["node", "openclaw", "docs", "help", "--help"],
+      ["node", "openclaw", "docs", "help", "--help"],
+    ],
+
+    [
+      "known command group help target help flag",
+      ["node", "openclaw", "plugins", "help", "list", "--help"],
+      ["node", "openclaw", "plugins", "list", "--help"],
+    ],
+
+    [
+      "terminator help flag remains untouched",
+      ["node", "openclaw", "backup", "help", "--", "--help"],
+      ["node", "openclaw", "backup", "help", "--", "--help"],
+    ],
+  ])("normalizes generated help commands: %s", (_name, argv, expected) => {
+    expect(normalizeGeneratedHelpCommandArgv(argv)).toEqual(expected);
   });
 
-  it("extracts command path ignoring flags and terminator", () => {
-    expect(getCommandPath(["node", "openclaw", "status", "--json"], 2)).toEqual(["status"]);
-    expect(getCommandPath(["node", "openclaw", "agents", "list"], 2)).toEqual(["agents", "list"]);
-    expect(getCommandPath(["node", "openclaw", "status", "--", "ignored"], 2)).toEqual(["status"]);
+  it.each([
+    [
+      "root help self-help remains untouched",
+      ["node", "openclaw", "help", "--help"],
+      ["node", "openclaw", "help", "--help"],
+    ],
+    [
+      "nested root help target with help flag",
+      ["node", "openclaw", "help", "plugins", "list", "--help"],
+      ["node", "openclaw", "plugins", "list", "--help"],
+    ],
+  ])("normalizes root help targets: %s", (_name, argv, expected) => {
+    expect(normalizeRootHelpTargetArgv(argv)).toEqual(expected);
   });
 
-  it("returns primary command", () => {
-    expect(getPrimaryCommand(["node", "openclaw", "agents", "list"])).toBe("agents");
-    expect(getPrimaryCommand(["node", "openclaw"])).toBeNull();
+  it("allows final command metadata to lift no-color after boolean command flags", () => {
+    const argv = ["node", "openclaw", "doctor", "--lint", "--json", "--no-color"];
+
+    expect(
+      normalizeRootNoColorArgv(argv, {
+        shouldPreserveNoColor: ({ remainingArgs, noColorIndex }) =>
+          remainingArgs[noColorIndex - 1] === "--message",
+      }),
+    ).toEqual(["node", "openclaw", "--no-color", "doctor", "--lint", "--json"]);
   });
 
-  it("parses boolean flags and ignores terminator", () => {
-    expect(hasFlag(["node", "openclaw", "status", "--json"], "--json")).toBe(true);
-    expect(hasFlag(["node", "openclaw", "--", "--json"], "--json")).toBe(false);
+  it.each([
+    [
+      "subcommand trailing log-level equals form",
+      ["node", "openclaw", "doctor", "--log-level=trace", "--json"],
+      ["node", "openclaw", "--log-level=trace", "doctor", "--json"],
+    ],
+    [
+      "keeps existing root options first",
+      ["node", "openclaw", "--profile", "work", "doctor", "--log-level", "debug"],
+      ["node", "openclaw", "--profile", "work", "--log-level", "debug", "doctor"],
+    ],
+    [
+      "keeps log-level after possible command option value",
+      ["node", "openclaw", "agent", "--message", "--log-level", "debug"],
+      ["node", "openclaw", "agent", "--message", "--log-level", "debug"],
+    ],
+    [
+      "flag terminator leaves log-level positional",
+      ["node", "openclaw", "nodes", "run", "--", "--log-level", "debug"],
+      ["node", "openclaw", "nodes", "run", "--", "--log-level", "debug"],
+    ],
+    [
+      "missing value remains command scoped",
+      ["node", "openclaw", "doctor", "--log-level", "--json"],
+      ["node", "openclaw", "doctor", "--log-level", "--json"],
+    ],
+  ])("normalizes root --log-level before command parsing: %s", (_name, argv, expected) => {
+    expect(normalizeRootLogLevelArgv(argv)).toEqual(expected);
   });
 
-  it("extracts flag values with equals and missing values", () => {
-    expect(getFlagValue(["node", "openclaw", "status", "--timeout", "5000"], "--timeout")).toBe(
-      "5000",
+  it("preserves log-level when final command metadata owns the option", () => {
+    const argv = ["node", "openclaw", "plugin-cmd", "--log-level", "debug"];
+
+    expect(
+      normalizeRootLogLevelArgv(argv, {
+        shouldPreserveLogLevel: ({ remainingArgs, logLevelIndex }) =>
+          remainingArgs[logLevelIndex] === "--log-level",
+      }),
+    ).toEqual(argv);
+  });
+
+  it.each([
+    ["unknown plugin command help", ["node", "openclaw", "external-plugin", "tools", "help"], true],
+
+    ["help as option value", ["node", "openclaw", "agent", "--message", "help"], false],
+    ["help after terminator", ["node", "openclaw", "nodes", "invoke", "--", "help"], false],
+    [
+      "implicit root help command after terminator",
+      ["node", "openclaw", "--", "help", "config"],
+      true,
+    ],
+    [
+      "implicit parent help command after terminator",
+      ["node", "openclaw", "config", "--", "help"],
+      true,
+    ],
+
+    ["root version flag", ["node", "openclaw", "--version"], true],
+  ])("detects help/version invocations: %s", (_name, argv, expected) => {
+    expect(isHelpOrVersionInvocation(argv)).toBe(expected);
+  });
+
+  it.each([["root -v alias with profile", ["node", "openclaw", "--profile", "work", "-v"], true]])(
+    "detects root-only version invocations: %s",
+    (_name, argv, expected) => {
+      expect(isRootVersionInvocation(argv)).toBe(expected);
+    },
+  );
+
+  it("limits simple help fast paths to root options, a command, and help", () => {
+    const commands = new Set(["setup"]);
+    expect(
+      isSimpleCommandHelpInvocation(
+        ["node", "openclaw", "--profile", "work", "setup", "--help"],
+        commands,
+      ),
+    ).toBe(true);
+    expect(
+      isSimpleCommandHelpInvocation(
+        ["node", "openclaw", "setup", "--workspace", "--help"],
+        commands,
+      ),
+    ).toBe(false);
+    expect(
+      isSimpleCommandHelpInvocation(
+        ["node", "openclaw", "setup", "--profile", "work", "--help"],
+        commands,
+      ),
+    ).toBe(false);
+    expect(isSimpleCommandHelpInvocation(["node", "openclaw", "--help", "setup"], commands)).toBe(
+      false,
     );
-    expect(getFlagValue(["node", "openclaw", "status", "--timeout=2500"], "--timeout")).toBe(
-      "2500",
-    );
-    expect(getFlagValue(["node", "openclaw", "status", "--timeout"], "--timeout")).toBeNull();
-    expect(getFlagValue(["node", "openclaw", "status", "--timeout", "--json"], "--timeout")).toBe(
-      null,
-    );
-    expect(getFlagValue(["node", "openclaw", "--", "--timeout=99"], "--timeout")).toBeUndefined();
+  });
+
+  it("returns null when routed command sees unknown options", () => {
+    expect(
+      getCommandPositionalsWithRootOptions(
+        ["node", "openclaw", "config", "get", "--mystery", "value", "update.channel"],
+        {
+          commandPath: ["config", "get"],
+          booleanFlags: ["--json"],
+        },
+      ),
+    ).toBeNull();
+  });
+
+  it.each([
+    ["ignores flag after terminator", ["node", "openclaw", "--", "--json"], "--json", false],
+  ])("parses boolean flags: %s", (_name, argv, flag, expected) => {
+    expect(hasFlag(argv, flag)).toBe(expected);
+  });
+
+  it.each([
+    ["flag appears after terminator", ["node", "openclaw", "--", "--timeout=99"], undefined],
+    [
+      "repeated flag uses final value",
+      ["node", "openclaw", "status", "--timeout", "100", "--timeout=200"],
+      "200",
+    ],
+  ])("extracts flag values: %s", (_name, argv, expected) => {
+    expect(getFlagValue(argv, "--timeout")).toBe(expected);
   });
 
   it("parses verbose flags", () => {
     expect(getVerboseFlag(["node", "openclaw", "status", "--verbose"])).toBe(true);
-    expect(getVerboseFlag(["node", "openclaw", "status", "--debug"])).toBe(false);
-    expect(getVerboseFlag(["node", "openclaw", "status", "--debug"], { includeDebug: true })).toBe(
-      true,
-    );
+    expect(getVerboseFlag(["node", "openclaw", "status", "--debug"])).toBe(true);
   });
 
-  it("parses positive integer flag values", () => {
-    expect(getPositiveIntFlagValue(["node", "openclaw", "status"], "--timeout")).toBeUndefined();
-    expect(
-      getPositiveIntFlagValue(["node", "openclaw", "status", "--timeout"], "--timeout"),
-    ).toBeNull();
-    expect(
-      getPositiveIntFlagValue(["node", "openclaw", "status", "--timeout", "5000"], "--timeout"),
-    ).toBe(5000);
-    expect(
-      getPositiveIntFlagValue(["node", "openclaw", "status", "--timeout", "nope"], "--timeout"),
-    ).toBeUndefined();
+  it.each([
+    ["missing value", ["node", "openclaw", "status", "--timeout"], null],
+
+    ["zero", ["node", "openclaw", "status", "--timeout", "0"], null],
+  ])("parses positive integer flag values: %s", (_name, argv, expected) => {
+    expect(getPositiveIntFlagValue(argv, "--timeout")).toBe(expected);
   });
 
-  it("builds parse argv from raw args", () => {
-    const nodeArgv = buildParseArgv({
-      programName: "openclaw",
-      rawArgs: ["node", "openclaw", "status"],
-    });
-    expect(nodeArgv).toEqual(["node", "openclaw", "status"]);
-
-    const versionedNodeArgv = buildParseArgv({
-      programName: "openclaw",
-      rawArgs: ["node-22", "openclaw", "status"],
-    });
-    expect(versionedNodeArgv).toEqual(["node-22", "openclaw", "status"]);
-
-    const versionedNodeWindowsArgv = buildParseArgv({
-      programName: "openclaw",
-      rawArgs: ["node-22.2.0.exe", "openclaw", "status"],
-    });
-    expect(versionedNodeWindowsArgv).toEqual(["node-22.2.0.exe", "openclaw", "status"]);
-
-    const versionedNodePatchlessArgv = buildParseArgv({
-      programName: "openclaw",
-      rawArgs: ["node-22.2", "openclaw", "status"],
-    });
-    expect(versionedNodePatchlessArgv).toEqual(["node-22.2", "openclaw", "status"]);
-
-    const versionedNodeWindowsPatchlessArgv = buildParseArgv({
-      programName: "openclaw",
-      rawArgs: ["node-22.2.exe", "openclaw", "status"],
-    });
-    expect(versionedNodeWindowsPatchlessArgv).toEqual(["node-22.2.exe", "openclaw", "status"]);
-
-    const versionedNodeWithPathArgv = buildParseArgv({
-      programName: "openclaw",
-      rawArgs: ["/usr/bin/node-22.2.0", "openclaw", "status"],
-    });
-    expect(versionedNodeWithPathArgv).toEqual(["/usr/bin/node-22.2.0", "openclaw", "status"]);
-
-    const nodejsArgv = buildParseArgv({
-      programName: "openclaw",
-      rawArgs: ["nodejs", "openclaw", "status"],
-    });
-    expect(nodejsArgv).toEqual(["nodejs", "openclaw", "status"]);
-
-    const nonVersionedNodeArgv = buildParseArgv({
-      programName: "openclaw",
-      rawArgs: ["node-dev", "openclaw", "status"],
-    });
-    expect(nonVersionedNodeArgv).toEqual(["node", "openclaw", "node-dev", "openclaw", "status"]);
-
-    const directArgv = buildParseArgv({
-      programName: "openclaw",
-      rawArgs: ["openclaw", "status"],
-    });
-    expect(directArgv).toEqual(["node", "openclaw", "status"]);
-
-    const bunArgv = buildParseArgv({
-      programName: "openclaw",
-      rawArgs: ["bun", "src/entry.ts", "status"],
-    });
-    expect(bunArgv).toEqual(["bun", "src/entry.ts", "status"]);
-  });
-
-  it("builds parse argv from fallback args", () => {
-    const fallbackArgv = buildParseArgv({
-      programName: "openclaw",
-      fallbackArgv: ["status"],
-    });
-    expect(fallbackArgv).toEqual(["node", "openclaw", "status"]);
-  });
-
-  it("decides when to migrate state", () => {
-    expect(shouldMigrateState(["node", "openclaw", "status"])).toBe(false);
-    expect(shouldMigrateState(["node", "openclaw", "health"])).toBe(false);
-    expect(shouldMigrateState(["node", "openclaw", "sessions"])).toBe(false);
-    expect(shouldMigrateState(["node", "openclaw", "memory", "status"])).toBe(false);
-    expect(shouldMigrateState(["node", "openclaw", "agent", "--message", "hi"])).toBe(false);
-    expect(shouldMigrateState(["node", "openclaw", "agents", "list"])).toBe(true);
-    expect(shouldMigrateState(["node", "openclaw", "message", "send"])).toBe(true);
-  });
-
-  it("reuses command path for migrate state decisions", () => {
-    expect(shouldMigrateStateFromPath(["status"])).toBe(false);
-    expect(shouldMigrateStateFromPath(["agents", "list"])).toBe(true);
+  it.each([
+    [
+      "prefixes fallback when raw args start at program name",
+      ["openclaw", "status"],
+      ["node", "openclaw", "status"],
+    ],
+    [
+      "keeps bun execution argv",
+      ["bun", "src/entry.ts", "status"],
+      ["bun", "src/entry.ts", "status"],
+    ],
+  ] as const)("builds parse argv from raw args: %s", (_name, rawArgs, expected) => {
+    const parsed = buildParseArgv([...rawArgs]);
+    expect(parsed).toEqual([...expected]);
   });
 });

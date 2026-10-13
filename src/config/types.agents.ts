@@ -1,84 +1,38 @@
-import type { ChatType } from "../channels/chat-type.js";
+import type { z } from "zod";
 import type { AgentDefaultsConfig } from "./types.agent-defaults.js";
-import type { HumanDelayConfig, IdentityConfig } from "./types.base.js";
-import type { GroupChatConfig } from "./types.messages.js";
-import type {
-  SandboxBrowserSettings,
-  SandboxDockerSettings,
-  SandboxPruneSettings,
-} from "./types.sandbox.js";
-import type { AgentToolsConfig, MemorySearchConfig } from "./types.tools.js";
+import type { AgentSandboxConfig } from "./types.agents-shared.js";
+import type { MemorySearchConfig } from "./types.memory.js";
+import type { AgentToolsConfig } from "./types.tools.js";
+import type { TtsConfig } from "./types.tts.js";
+import type { AgentEntrySchema } from "./zod-schema.agent-runtime.js";
+import type { BindingsSchema } from "./zod-schema.agents.js";
+type SchemaAgentBinding = NonNullable<z.input<typeof BindingsSchema>>[number];
 
-export type AgentModelConfig =
-  | string
-  | {
-      /** Primary model (provider/model). */
-      primary?: string;
-      /** Per-agent model fallbacks (provider/model). */
-      fallbacks?: string[];
-    };
+export type AgentBindingMatch = AgentRouteBinding["match"];
 
-export type AgentConfig = {
-  id: string;
-  default?: boolean;
-  name?: string;
-  workspace?: string;
-  agentDir?: string;
-  model?: AgentModelConfig;
-  /** Optional allowlist of skills for this agent (omit = all skills; empty = none). */
-  skills?: string[];
-  memorySearch?: MemorySearchConfig;
-  /** Human-like delay between block replies for this agent. */
-  humanDelay?: HumanDelayConfig;
-  /** Optional per-agent heartbeat overrides. */
-  heartbeat?: AgentDefaultsConfig["heartbeat"];
-  identity?: IdentityConfig;
-  groupChat?: GroupChatConfig;
-  subagents?: {
-    /** Allow spawning sub-agents under other agent ids. Use "*" to allow any. */
-    allowAgents?: string[];
-    /** Per-agent default model for spawned sub-agents (string or {primary,fallbacks}). */
-    model?: string | { primary?: string; fallbacks?: string[] };
+export type AgentRouteBinding = Extract<SchemaAgentBinding, { type?: "route" }>;
+
+export type AgentAcpBinding = Extract<SchemaAgentBinding, { type: "acp" }>;
+
+export type AgentBinding = AgentRouteBinding | AgentAcpBinding;
+
+export type AgentConfig = Omit<
+  z.input<typeof AgentEntrySchema>,
+  "memory" | "tts" | "sandbox" | "tools"
+> & {
+  memory?: {
+    search?: MemorySearchConfig;
   };
-  sandbox?: {
-    mode?: "off" | "non-main" | "all";
-    /** Agent workspace access inside the sandbox. */
-    workspaceAccess?: "none" | "ro" | "rw";
-    /**
-     * Session tools visibility for sandboxed sessions.
-     * - "spawned": only allow session tools to target sessions spawned from this session (default)
-     * - "all": allow session tools to target any session
-     */
-    sessionToolsVisibility?: "spawned" | "all";
-    /** Container/workspace scope for sandbox isolation. */
-    scope?: "session" | "agent" | "shared";
-    /** Legacy alias for scope ("session" when true, "shared" when false). */
-    perSession?: boolean;
-    workspaceRoot?: string;
-    /** Docker-specific sandbox overrides for this agent. */
-    docker?: SandboxDockerSettings;
-    /** Optional sandboxed browser overrides for this agent. */
-    browser?: SandboxBrowserSettings;
-    /** Auto-prune overrides for this agent. */
-    prune?: SandboxPruneSettings;
-  };
+  tts?: TtsConfig & { prefsPath?: string };
+  /** Optional per-agent sandbox overrides. */
+  sandbox?: AgentSandboxConfig;
   tools?: AgentToolsConfig;
 };
 
-export type AgentsConfig = {
-  defaults?: AgentDefaultsConfig;
-  list?: AgentConfig[];
-};
+export type AgentEntryConfig = Omit<AgentConfig, "id">;
 
-export type AgentBinding = {
-  agentId: string;
-  match: {
-    channel: string;
-    accountId?: string;
-    peer?: { kind: ChatType; id: string };
-    guildId?: string;
-    teamId?: string;
-    /** Discord role IDs used for role-based routing. */
-    roles?: string[];
-  };
+export type AgentsConfig = {
+  ownership?: "explicit";
+  defaults?: AgentDefaultsConfig;
+  entries?: Record<string, AgentEntryConfig>;
 };

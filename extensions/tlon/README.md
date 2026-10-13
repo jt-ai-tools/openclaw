@@ -1,11 +1,5 @@
-# tlon 目錄索引
+# Tlon (OpenClaw plugin)
 
-### 文件
+Tlon/Urbit channel plugin for OpenClaw. Supports DMs, group mentions, and thread replies.
 
-| 檔案名稱 | 連結 |
-| :--- | :--- |
-| README_zh_TW.md | [README_zh_TW.md](README_zh_TW.md) |
-
-### 子目錄
-
-- [src](src/README.md)
+Docs: https://docs.openclaw.ai/channels/tlon

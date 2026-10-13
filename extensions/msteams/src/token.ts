@@ -1,19 +1,34 @@
-import type { MSTeamsConfig } from "openclaw/plugin-sdk";
+import { isFutureDateTimestampMs } from "openclaw/plugin-sdk/number-runtime";
+import { loadMSTeamsDelegatedTokens, saveMSTeamsDelegatedTokens } from "./delegated-state.js";
+import { refreshMSTeamsDelegatedTokens } from "./oauth.token.js";
 
-export type MSTeamsCredentials = {
-  appId: string;
-  appPassword: string;
+export async function resolveDelegatedAccessToken(params: {
   tenantId: string;
-};
-
-export function resolveMSTeamsCredentials(cfg?: MSTeamsConfig): MSTeamsCredentials | undefined {
-  const appId = cfg?.appId?.trim() || process.env.MSTEAMS_APP_ID?.trim();
-  const appPassword = cfg?.appPassword?.trim() || process.env.MSTEAMS_APP_PASSWORD?.trim();
-  const tenantId = cfg?.tenantId?.trim() || process.env.MSTEAMS_TENANT_ID?.trim();
-
-  if (!appId || !appPassword || !tenantId) {
+  clientId: string;
+  clientSecret: string;
+  accountId?: string | null;
+}): Promise<string | undefined> {
+  const tokens = await loadMSTeamsDelegatedTokens(params.accountId);
+  if (!tokens) {
     return undefined;
   }
 
-  return { appId, appPassword, tenantId };
+  // Token still valid (5-min buffer already baked into expiresAt)
+  if (isFutureDateTimestampMs(tokens.expiresAt)) {
+    return tokens.accessToken;
+  }
+
+  try {
+    const refreshed = await refreshMSTeamsDelegatedTokens({
+      tenantId: params.tenantId,
+      clientId: params.clientId,
+      clientSecret: params.clientSecret,
+      refreshToken: tokens.refreshToken,
+      scopes: tokens.scopes,
+    });
+    await saveMSTeamsDelegatedTokens(refreshed, params.accountId);
+    return refreshed.accessToken;
+  } catch {
+    return undefined;
+  }
 }

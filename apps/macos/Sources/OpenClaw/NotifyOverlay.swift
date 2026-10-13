@@ -10,7 +10,6 @@ final class NotifyOverlayController {
     static let shared = NotifyOverlayController()
 
     private(set) var model = Model()
-    var isVisible: Bool { self.model.isVisible }
 
     struct Model {
         var title: String = ""
@@ -21,6 +20,7 @@ final class NotifyOverlayController {
     private var window: NSPanel?
     private var hostingView: NSHostingView<NotifyOverlayView>?
     private var dismissTask: Task<Void, Never>?
+    @ObservationIgnored private var dismissalID: UUID?
 
     private let width: CGFloat = 360
     private let padding: CGFloat = 12
@@ -28,17 +28,24 @@ final class NotifyOverlayController {
     private let minHeight: CGFloat = 64
 
     func present(title: String, body: String, autoDismissAfter: TimeInterval = 6) {
+        let isFirst = !self.model.isVisible || self.dismissalID != nil
+        self.dismissalID = nil
         self.dismissTask?.cancel()
         self.model.title = title
         self.model.body = body
-        self.ensureWindow()
-        self.hostingView?.rootView = NotifyOverlayView(controller: self)
-        self.presentWindow()
+        self.presentWindow(isFirst: isFirst)
 
         if autoDismissAfter > 0 {
             self.dismissTask = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: UInt64(autoDismissAfter * 1_000_000_000))
-                await MainActor.run { self?.dismiss() }
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(autoDismissAfter * 1_000_000_000))
+                } catch {
+                    return
+                }
+                await MainActor.run {
+                    guard !Task.isCancelled else { return }
+                    self?.dismiss()
+                }
             }
         }
     }
@@ -46,66 +53,41 @@ final class NotifyOverlayController {
     func dismiss() {
         self.dismissTask?.cancel()
         self.dismissTask = nil
+        let dismissalID = UUID()
+        self.dismissalID = dismissalID
         guard let window else { return }
 
-        let target = window.frame.offsetBy(dx: 8, dy: 6)
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.16
-            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            window.animator().setFrame(target, display: true)
-            window.animator().alphaValue = 0
-        } completionHandler: {
-            Task { @MainActor in
-                window.orderOut(nil)
-                self.model.isVisible = false
-            }
+        OverlayPanelFactory.animateDismiss(window: window, offsetX: 8, offsetY: 6) { [weak self] in
+            guard let self, self.dismissalID == dismissalID else { return }
+            window.orderOut(nil)
+            self.model.isVisible = false
+            self.dismissalID = nil
         }
     }
 
     // MARK: - Private
 
-    private func presentWindow() {
+    private func presentWindow(isFirst: Bool) {
         self.ensureWindow()
         self.hostingView?.rootView = NotifyOverlayView(controller: self)
         let target = self.targetFrame()
-
-        guard let window else { return }
-        if !self.model.isVisible {
-            self.model.isVisible = true
-            let start = target.offsetBy(dx: 0, dy: -6)
-            window.setFrame(start, display: true)
-            window.alphaValue = 0
-            window.orderFrontRegardless()
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.18
-                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                window.animator().setFrame(target, display: true)
-                window.animator().alphaValue = 1
-            }
-        } else {
-            self.updateWindowFrame(animate: true)
-            window.orderFrontRegardless()
+        if isFirst { self.model.isVisible = true }
+        OverlayPanelFactory.present(
+            window: self.window,
+            isFirstPresent: isFirst,
+            target: target)
+        { window in
+            OverlayPanelFactory.applyFrame(window: self.window, target: self.targetFrame(), animate: true)
+            AppActivation.shared.orderFrontRegardless(window: window)
         }
     }
 
     private func ensureWindow() {
         if self.window != nil { return }
-        let panel = NSPanel(
+        let panel = OverlayPanelFactory.makePanel(
             contentRect: NSRect(x: 0, y: 0, width: self.width, height: self.minHeight),
-            styleMask: [.nonactivatingPanel, .borderless],
-            backing: .buffered,
-            defer: false)
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = true
-        panel.level = .statusBar
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
-        panel.hidesOnDeactivate = false
-        panel.isMovable = false
-        panel.isFloatingPanel = true
-        panel.becomesKeyOnlyIfNeeded = true
-        panel.titleVisibility = .hidden
-        panel.titlebarAppearsTransparent = true
+            level: .statusBar,
+            hasShadow: true)
 
         let host = NSHostingView(rootView: NotifyOverlayView(controller: self))
         host.translatesAutoresizingMaskIntoConstraints = false
@@ -123,38 +105,21 @@ final class NotifyOverlayController {
         return NSRect(origin: origin, size: size)
     }
 
-    private func updateWindowFrame(animate: Bool = false) {
-        guard let window else { return }
-        let frame = self.targetFrame()
-        if animate {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.12
-                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                window.animator().setFrame(frame, display: true)
-            }
-        } else {
-            window.setFrame(frame, display: true)
-        }
-    }
-
     private func measuredHeight() -> CGFloat {
         let maxWidth = self.width - self.padding * 2
         let titleFont = NSFont.systemFont(ofSize: 13, weight: .semibold)
         let bodyFont = NSFont.systemFont(ofSize: 12, weight: .regular)
 
-        let titleRect = (self.model.title as NSString).boundingRect(
-            with: CGSize(width: maxWidth, height: .greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: titleFont],
-            context: nil)
-
-        let bodyRect = (self.model.body as NSString).boundingRect(
-            with: CGSize(width: maxWidth, height: .greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: bodyFont],
-            context: nil)
-
-        let contentHeight = ceil(titleRect.height + 6 + bodyRect.height)
+        func height(_ text: String, font: NSFont) -> CGFloat {
+            (text as NSString).boundingRect(
+                with: CGSize(width: maxWidth, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: [.font: font],
+                context: nil).height
+        }
+        let contentHeight = ceil(height(self.model.title, font: titleFont) + 6 + height(
+            self.model.body,
+            font: bodyFont))
         let total = contentHeight + self.padding * 2
         return max(self.minHeight, min(total, self.maxHeight))
     }

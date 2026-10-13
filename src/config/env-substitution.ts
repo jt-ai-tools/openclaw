@@ -1,31 +1,13 @@
-/**
- * Environment variable substitution for config values.
- *
- * Supports `${VAR_NAME}` syntax in string values, substituted at config load time.
- * - Only uppercase env vars are matched: `[A-Z_][A-Z0-9_]*`
- * - Escape with `$${}` to output literal `${}`
- * - Missing env vars throw `MissingEnvVarError` with context
- *
- * @example
- * ```json5
- * {
- *   models: {
- *     providers: {
- *       "vercel-gateway": {
- *         apiKey: "${VERCEL_GATEWAY_API_KEY}"
- *       }
- *     }
- *   }
- * }
- * ```
- */
-
-// Pattern for valid uppercase env var names: starts with letter or underscore,
-// followed by letters, numbers, or underscores (all uppercase)
-import { isPlainObject } from "../utils.js";
+import { isPlainObject } from "../infra/plain-object.js";
+import { appendConfigPathSegment } from "../shared/dot-path.js";
+import { parseEnvTemplateSecretRef } from "./types.secrets.js";
 
 const ENV_VAR_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
 
+// Bare references and defaults both treat an empty environment value as missing.
+const DEFAULT_VALUE_OPERATOR = ":-";
+
+/** Error thrown when a config value references a missing or empty environment variable. */
 export class MissingEnvVarError extends Error {
   constructor(
     public readonly varName: string,
@@ -36,92 +18,189 @@ export class MissingEnvVarError extends Error {
   }
 }
 
-function substituteString(value: string, env: NodeJS.ProcessEnv, configPath: string): string {
+/** One recognized `${VAR}` / `${VAR:-fallback}` placeholder, without its position. */
+export type EnvTemplateToken = {
+  kind: "escaped" | "substitution";
+  name: string;
+  /** Authored fallback text, or `undefined` for a bare reference. `""` is a real empty fallback. */
+  defaultValue?: string;
+};
+
+/** Rebuilds the authored placeholder text for a parsed token. */
+function renderEnvTemplateToken(token: EnvTemplateToken): string {
+  return token.defaultValue === undefined
+    ? `\${${token.name}}`
+    : `\${${token.name}${DEFAULT_VALUE_OPERATOR}${token.defaultValue}}`;
+}
+
+/** Shares the substitution grammar with write-back preservation, in authoring order. */
+export function scanEnvTemplateTokens(value: string): EnvTemplateToken[] {
+  return Array.from(iterateEnvTemplateTokens(value), (token) => ({
+    kind: token.kind,
+    name: token.name,
+    defaultValue: token.defaultValue,
+  }));
+}
+
+function* iterateEnvTemplateTokens(
+  value: string,
+): Generator<EnvTemplateToken & { start: number; end: number }> {
+  for (let index = value.indexOf("$"); index !== -1; index = value.indexOf("$", index + 1)) {
+    // Parse escaped placeholders first so "$${VAR}" never resolves from env.
+    const escaped = value[index + 1] === "$" && value[index + 2] === "{";
+    if (!escaped && value[index + 1] !== "{") {
+      continue;
+    }
+    const start = index + (escaped ? 3 : 2);
+    const end = value.indexOf("}", start);
+    if (end === -1) {
+      continue;
+    }
+    const body = value.slice(start, end);
+    const operatorIndex = body.indexOf(DEFAULT_VALUE_OPERATOR);
+    const name = operatorIndex === -1 ? body : body.slice(0, operatorIndex);
+    const defaultValue =
+      operatorIndex === -1 ? undefined : body.slice(operatorIndex + DEFAULT_VALUE_OPERATOR.length);
+    // Nested fallbacks stay literal; their inner references are scanned independently.
+    if (
+      !ENV_VAR_NAME_PATTERN.test(name) ||
+      defaultValue?.includes("$") ||
+      defaultValue?.includes("{")
+    ) {
+      continue;
+    }
+    yield { kind: escaped ? "escaped" : "substitution", name, defaultValue, start: index, end };
+    index = end;
+  }
+}
+
+/** Missing environment variable warning emitted when substitution is configured to continue. */
+export type EnvSubstitutionWarning = {
+  varName: string;
+  configPath: string;
+};
+
+type SubstituteOptions = {
+  /** When set, missing vars call this instead of throwing and the original placeholder is preserved. */
+  onMissing?: (warning: EnvSubstitutionWarning) => void;
+  /** Records exact env SecretRef shorthand that substitution did not materialize. */
+  onPendingEnvSecretRef?: (id: string, configPath: string) => void;
+  /** Records the source of an exact env SecretRef shorthand that substitution materialized. */
+  onResolvedEnvSecretRef?: (id: string, configPath: string) => void;
+};
+
+function substituteString(
+  value: string,
+  env: NodeJS.ProcessEnv,
+  configPath: string,
+  opts?: SubstituteOptions,
+): string {
   if (!value.includes("$")) {
     return value;
   }
 
+  const authoredRef = parseEnvTemplateSecretRef(value);
+  if (authoredRef && !containsEnvVarReference(value)) {
+    opts?.onPendingEnvSecretRef?.(authoredRef.id, configPath);
+  }
   const chunks: string[] = [];
-
-  for (let i = 0; i < value.length; i += 1) {
-    const char = value[i];
-    if (char !== "$") {
-      chunks.push(char);
+  let end = 0;
+  for (const token of iterateEnvTemplateTokens(value)) {
+    chunks.push(value.slice(end, token.start));
+    end = token.end + 1;
+    if (token.kind === "escaped") {
+      chunks.push(renderEnvTemplateToken(token));
       continue;
     }
-
-    const next = value[i + 1];
-    const afterNext = value[i + 2];
-
-    // Escaped: $${VAR} -> ${VAR}
-    if (next === "$" && afterNext === "{") {
-      const start = i + 3;
-      const end = value.indexOf("}", start);
-      if (end !== -1) {
-        const name = value.slice(start, end);
-        if (ENV_VAR_NAME_PATTERN.test(name)) {
-          chunks.push(`\${${name}}`);
-          i = end;
-          continue;
-        }
+    const envValue = env[token.name];
+    if (envValue === undefined || envValue === "") {
+      if (token.defaultValue !== undefined) {
+        // An authored fallback resolves the reference without a missing or pending signal.
+        chunks.push(token.defaultValue);
+        continue;
       }
-    }
-
-    // Substitution: ${VAR} -> value
-    if (next === "{") {
-      const start = i + 2;
-      const end = value.indexOf("}", start);
-      if (end !== -1) {
-        const name = value.slice(start, end);
-        if (ENV_VAR_NAME_PATTERN.test(name)) {
-          const envValue = env[name];
-          if (envValue === undefined || envValue === "") {
-            throw new MissingEnvVarError(name, configPath);
-          }
-          chunks.push(envValue);
-          i = end;
-          continue;
+      if (opts?.onMissing) {
+        opts.onMissing({ varName: token.name, configPath });
+        if (authoredRef?.id === token.name) {
+          opts.onPendingEnvSecretRef?.(token.name, configPath);
         }
+        // Preserve the original placeholder so the value is visibly unresolved.
+        chunks.push(renderEnvTemplateToken(token));
+        continue;
       }
+      throw new MissingEnvVarError(token.name, configPath);
     }
-
-    // Leave untouched if not a recognized pattern
-    chunks.push(char);
+    if (authoredRef?.id === token.name) {
+      opts?.onResolvedEnvSecretRef?.(token.name, configPath);
+    }
+    chunks.push(envValue);
   }
+  chunks.push(value.slice(end));
 
   return chunks.join("");
 }
 
-function substituteAny(value: unknown, env: NodeJS.ProcessEnv, path: string): unknown {
-  if (typeof value === "string") {
-    return substituteString(value, env, path);
-  }
-
-  if (Array.isArray(value)) {
-    return value.map((item, index) => substituteAny(item, env, `${path}[${index}]`));
-  }
-
-  if (isPlainObject(value)) {
-    const result: Record<string, unknown> = {};
-    for (const [key, val] of Object.entries(value)) {
-      const childPath = path ? `${path}.${key}` : key;
-      result[key] = substituteAny(val, env, childPath);
+/** Detects unescaped `${VAR}` references without treating escaped `$${VAR}` as references. */
+export function containsEnvVarReference(value: string): boolean {
+  for (const token of iterateEnvTemplateTokens(value)) {
+    if (token.kind === "substitution") {
+      return true;
     }
-    return result;
   }
-
-  // Primitives (number, boolean, null) pass through unchanged
-  return value;
+  return false;
 }
 
-/**
- * Resolves `${VAR_NAME}` environment variable references in config values.
- *
- * @param obj - The parsed config object (after JSON5 parse and $include resolution)
- * @param env - Environment variables to use for substitution (defaults to process.env)
- * @returns The config object with env vars substituted
- * @throws {MissingEnvVarError} If a referenced env var is not set or empty
- */
-export function resolveConfigEnvVars(obj: unknown, env: NodeJS.ProcessEnv = process.env): unknown {
-  return substituteAny(obj, env, "");
+/** Resolve config string templates, preserving unresolved text when onMissing is supplied. */
+export function resolveConfigEnvVars(
+  value: unknown,
+  env: NodeJS.ProcessEnv = process.env,
+  opts?: SubstituteOptions,
+): unknown {
+  // Resume one parent at a time so callbacks retain recursive depth-first order
+  // without consuming the engine stack for deeply nested replacement values.
+  const pending: Array<() => boolean> = [];
+  const visit = (current: unknown, currentPath: string): unknown => {
+    if (typeof current === "string") {
+      return substituteString(current, env, currentPath, opts);
+    }
+    if (Array.isArray(current)) {
+      const length = current.length;
+      const result: unknown[] = [];
+      result.length = length;
+      let index = 0;
+      pending.push(() => {
+        while (index < length) {
+          const key = index++;
+          if (key in current) {
+            result[key] = visit(current[key], `${currentPath}[${key}]`);
+            return true;
+          }
+        }
+        return false;
+      });
+      return result;
+    }
+    if (isPlainObject(current)) {
+      const result: Record<string, unknown> = {};
+      const entries = Object.entries(current)[Symbol.iterator]();
+      pending.push(() => {
+        const entry = entries.next();
+        if (entry.done) {
+          return false;
+        }
+        const [key, child] = entry.value;
+        result[key] = visit(child, appendConfigPathSegment(currentPath, key));
+        return true;
+      });
+      return result;
+    }
+    return current;
+  };
+  const result = visit(value, "");
+  for (let next = pending.at(-1); next; next = pending.at(-1)) {
+    if (!next()) {
+      pending.pop();
+    }
+  }
+  return result;
 }

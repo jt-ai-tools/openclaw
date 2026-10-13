@@ -1,15 +1,20 @@
-import type { MsgContext } from "../auto-reply/templating.js";
-import type { OpenClawConfig } from "../config/config.js";
-import type { MediaUnderstandingProvider } from "./types.js";
+import type { ActiveMediaModel } from "../../packages/media-understanding-common/src/active-model.js";
+// Audio preflight transcribes voice notes before mention checks and optionally
+// echoes the transcript back to the source chat.
+import type { RuntimeMsgContext as MsgContext } from "../auto-reply/templating.js";
+import type { OpenClawConfig } from "../config/types.js";
 import { logVerbose, shouldLogVerbose } from "../globals.js";
+import { normalizeMediaFacts } from "../media/media-facts.js";
 import { isAudioAttachment } from "./attachments.js";
+import { DEFAULT_ECHO_TRANSCRIPT_FORMAT, sendTranscriptEcho } from "./echo-transcript.js";
 import {
-  type ActiveMediaModel,
   buildProviderRegistry,
   createMediaAttachmentCache,
   normalizeMediaAttachments,
+  resolveMediaAttachmentLocalRoots,
   runCapability,
 } from "./runner.js";
+import type { MediaUnderstandingProvider } from "./types.js";
 
 /**
  * Transcribes the first audio attachment BEFORE mention checking.
@@ -25,20 +30,13 @@ export async function transcribeFirstAudio(params: {
 }): Promise<string | undefined> {
   const { ctx, cfg } = params;
 
-  // Check if audio transcription is enabled in config
   const audioConfig = cfg.tools?.media?.audio;
-  if (!audioConfig || audioConfig.enabled === false) {
+  if (audioConfig?.enabled === false) {
     return undefined;
   }
 
-  const attachments = normalizeMediaAttachments(ctx);
-  if (!attachments || attachments.length === 0) {
-    return undefined;
-  }
-
-  // Find first audio attachment
-  const firstAudio = attachments.find(
-    (att) => att && isAudioAttachment(att) && !att.alreadyTranscribed,
+  const firstAudio = normalizeMediaAttachments(ctx).find(
+    (att) => isAudioAttachment(att) && !att.alreadyTranscribed,
   );
 
   if (!firstAudio) {
@@ -49,49 +47,68 @@ export async function transcribeFirstAudio(params: {
     logVerbose(`audio-preflight: transcribing attachment ${firstAudio.index} for mention check`);
   }
 
-  const providerRegistry = buildProviderRegistry(params.providers);
-  const cache = createMediaAttachmentCache(attachments);
-
   try {
-    const result = await runCapability({
-      capability: "audio",
-      cfg,
-      ctx,
-      attachments: cache,
-      media: attachments,
-      agentDir: params.agentDir,
-      providerRegistry,
-      config: audioConfig,
-      activeModel: params.activeModel,
+    const media = [firstAudio];
+    const { agentDir, providers, activeModel } = params;
+    const localPathRoots = resolveMediaAttachmentLocalRoots({ cfg, ctx });
+    const providerRegistry = buildProviderRegistry(providers, cfg);
+    const cache = createMediaAttachmentCache(media, {
+      localPathRoots,
+      ssrfPolicy: cfg.tools?.web?.fetch?.ssrfPolicy,
     });
-
-    if (!result || result.outputs.length === 0) {
+    let transcript: string | undefined;
+    try {
+      const result = await runCapability({
+        capability: "audio",
+        cfg,
+        ctx,
+        attachments: cache,
+        media,
+        agentDir,
+        providerRegistry,
+        config: cfg.tools?.media?.audio,
+        activeModel,
+      });
+      transcript = result.outputs
+        .find((entry) => entry.kind === "audio.transcription")
+        ?.text?.trim();
+    } finally {
+      await cache.cleanup();
+    }
+    if (!transcript) {
       return undefined;
     }
 
-    // Extract transcript from first audio output
-    const audioOutput = result.outputs.find((output) => output.kind === "audio.transcription");
-    if (!audioOutput || !audioOutput.text) {
-      return undefined;
+    if (audioConfig?.echoTranscript) {
+      await sendTranscriptEcho({
+        ctx,
+        cfg,
+        transcript,
+        format: audioConfig.echoFormat ?? DEFAULT_ECHO_TRANSCRIPT_FORMAT,
+      });
     }
 
-    // Mark this attachment as transcribed to avoid double-processing
-    firstAudio.alreadyTranscribed = true;
+    // Persist transcription state on the matching fact so later normalization
+    // cannot shift or lose it through a parallel index list.
+    const facts = normalizeMediaFacts(ctx.media);
+    const transcribedFact = facts[firstAudio.index];
+    if (transcribedFact) {
+      facts[firstAudio.index] = { ...transcribedFact, transcribed: true };
+      ctx.media = facts;
+    }
 
     if (shouldLogVerbose()) {
       logVerbose(
-        `audio-preflight: transcribed ${audioOutput.text.length} chars from attachment ${firstAudio.index}`,
+        `audio-preflight: transcribed ${transcript.length} chars from attachment ${firstAudio.index}`,
       );
     }
 
-    return audioOutput.text;
+    return transcript;
   } catch (err) {
-    // Log but don't throw - let the message proceed with text-only mention check
+    // Preflight cannot block message handling; mention checks can still run on text-only input.
     if (shouldLogVerbose()) {
       logVerbose(`audio-preflight: transcription failed: ${String(err)}`);
     }
     return undefined;
-  } finally {
-    await cache.cleanup();
   }
 }

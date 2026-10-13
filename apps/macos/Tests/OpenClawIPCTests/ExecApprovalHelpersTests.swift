@@ -2,16 +2,8 @@ import Foundation
 import Testing
 @testable import OpenClaw
 
-@Suite struct ExecApprovalHelpersTests {
-    @Test func parseDecisionTrimsAndRejectsInvalid() {
-        #expect(ExecApprovalHelpers.parseDecision("allow-once") == .allowOnce)
-        #expect(ExecApprovalHelpers.parseDecision(" allow-always ") == .allowAlways)
-        #expect(ExecApprovalHelpers.parseDecision("deny") == .deny)
-        #expect(ExecApprovalHelpers.parseDecision("") == nil)
-        #expect(ExecApprovalHelpers.parseDecision("nope") == nil)
-    }
-
-    @Test func allowlistPatternPrefersResolution() {
+struct ExecApprovalHelpersTests {
+    @Test func `allowlist pattern prefers resolution`() {
         let resolved = ExecCommandResolution(
             rawExecutable: "rg",
             resolvedPath: "/opt/homebrew/bin/rg",
@@ -29,7 +21,19 @@ import Testing
         #expect(ExecApprovalHelpers.allowlistPattern(command: [], resolution: nil) == nil)
     }
 
-    @Test func requiresAskMatchesPolicy() {
+    @Test func `allowlist matching trims patterns and rejects blank entries`() {
+        let resolution = ExecCommandResolution(
+            rawExecutable: "rg",
+            resolvedPath: "/opt/homebrew/bin/rg",
+            executableName: "rg",
+            cwd: nil)
+        let valid = ExecAllowlistEntry(pattern: "  rg\n")
+        #expect(ExecAllowlistMatcher.match(entries: [valid], resolution: resolution) == valid)
+        #expect(ExecAllowlistMatcher.match(
+            entries: [ExecAllowlistEntry(pattern: " \n ")], resolution: resolution) == nil)
+    }
+
+    @Test func `requires ask matches policy`() {
         let entry = ExecAllowlistEntry(pattern: "/bin/ls", lastUsedAt: nil, lastUsedCommand: nil, lastResolvedPath: nil)
         #expect(ExecApprovalHelpers.requiresAsk(
             ask: .always,

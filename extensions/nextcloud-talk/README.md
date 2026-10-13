@@ -1,5 +1,11 @@
-# nextcloud-talk 目錄索引
+# OpenClaw Nextcloud Talk
 
-### 子目錄
+Official OpenClaw channel plugin for Nextcloud Talk conversations.
 
-- [src](src/README.md)
+Install from OpenClaw:
+
+```bash
+openclaw plugins install @openclaw/nextcloud-talk
+```
+
+Configure the Nextcloud server and Talk credentials in OpenClaw, then enable the conversations where agents should receive and send messages.

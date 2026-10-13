@@ -1,12 +1,25 @@
 import { describe, expect, it, vi } from "vitest";
-import { sleep } from "../utils.ts";
 import {
+  createAckReactionHandle,
+  removeAckReactionHandleAfterReply,
   removeAckReactionAfterReply,
   shouldAckReaction,
-  shouldAckReactionForWhatsApp,
 } from "./ack-reactions.js";
 
+const flushMicrotasks = async () => {
+  await Promise.resolve();
+};
+
 describe("shouldAckReaction", () => {
+  const groupMentionsScope = {
+    scope: "group-mentions" as const,
+    isDirect: false,
+    isGroup: true,
+    isMentionableGroup: true,
+    canDetectMention: true,
+    effectiveWasMentioned: true,
+  };
+
   it("honors direct and group-all scopes", () => {
     expect(
       shouldAckReaction({
@@ -14,7 +27,6 @@ describe("shouldAckReaction", () => {
         isDirect: true,
         isGroup: false,
         isMentionableGroup: false,
-        requireMention: false,
         canDetectMention: false,
         effectiveWasMentioned: false,
       }),
@@ -22,114 +34,76 @@ describe("shouldAckReaction", () => {
 
     expect(
       shouldAckReaction({
+        ...groupMentionsScope,
         scope: "group-all",
-        isDirect: false,
-        isGroup: true,
-        isMentionableGroup: true,
-        requireMention: false,
         canDetectMention: false,
         effectiveWasMentioned: false,
       }),
     ).toBe(true);
   });
 
-  it("skips when scope is off or none", () => {
+  it("skips when scope is off", () => {
     expect(
       shouldAckReaction({
+        ...groupMentionsScope,
         scope: "off",
         isDirect: true,
-        isGroup: true,
-        isMentionableGroup: true,
-        requireMention: true,
-        canDetectMention: true,
-        effectiveWasMentioned: true,
       }),
     ).toBe(false);
+  });
 
+  it.each([
+    ["all", true],
+    ["group-all", false],
+  ] as const)("applies %s scope to ambient room events", (scope, expected) => {
     expect(
       shouldAckReaction({
-        scope: "none",
-        isDirect: true,
-        isGroup: true,
-        isMentionableGroup: true,
-        requireMention: true,
-        canDetectMention: true,
-        effectiveWasMentioned: true,
+        ...groupMentionsScope,
+        scope,
+        inboundEventKind: "room_event",
+        effectiveWasMentioned: false,
       }),
-    ).toBe(false);
+    ).toBe(expected);
   });
 
   it("defaults to group-mentions gating", () => {
     expect(
       shouldAckReaction({
+        ...groupMentionsScope,
         scope: undefined,
-        isDirect: false,
-        isGroup: true,
-        isMentionableGroup: true,
-        requireMention: true,
-        canDetectMention: true,
-        effectiveWasMentioned: true,
       }),
     ).toBe(true);
   });
 
   it("requires mention gating for group-mentions", () => {
-    expect(
-      shouldAckReaction({
-        scope: "group-mentions",
-        isDirect: false,
-        isGroup: true,
-        isMentionableGroup: true,
-        requireMention: false,
-        canDetectMention: true,
-        effectiveWasMentioned: true,
-      }),
-    ).toBe(false);
+    // A group that answers every message still acks the ones addressing the
+    // agent: whether the group requires a mention is a separate policy.
+    expect(shouldAckReaction(groupMentionsScope)).toBe(true);
 
     expect(
       shouldAckReaction({
-        scope: "group-mentions",
-        isDirect: false,
-        isGroup: true,
-        isMentionableGroup: true,
-        requireMention: true,
+        ...groupMentionsScope,
         canDetectMention: false,
-        effectiveWasMentioned: true,
       }),
     ).toBe(false);
 
     expect(
       shouldAckReaction({
-        scope: "group-mentions",
-        isDirect: false,
-        isGroup: true,
+        ...groupMentionsScope,
         isMentionableGroup: false,
-        requireMention: true,
-        canDetectMention: true,
-        effectiveWasMentioned: true,
       }),
     ).toBe(false);
 
     expect(
       shouldAckReaction({
-        scope: "group-mentions",
-        isDirect: false,
-        isGroup: true,
-        isMentionableGroup: true,
-        requireMention: true,
-        canDetectMention: true,
-        effectiveWasMentioned: true,
+        ...groupMentionsScope,
+        effectiveWasMentioned: false,
       }),
-    ).toBe(true);
+    ).toBe(false);
 
     expect(
       shouldAckReaction({
-        scope: "group-mentions",
-        isDirect: false,
-        isGroup: true,
-        isMentionableGroup: true,
-        requireMention: true,
-        canDetectMention: true,
+        ...groupMentionsScope,
         effectiveWasMentioned: false,
         shouldBypassMention: true,
       }),
@@ -137,112 +111,50 @@ describe("shouldAckReaction", () => {
   });
 });
 
-describe("shouldAckReactionForWhatsApp", () => {
-  it("respects direct and group modes", () => {
-    expect(
-      shouldAckReactionForWhatsApp({
-        emoji: "👀",
-        isDirect: true,
-        isGroup: false,
-        directEnabled: true,
-        groupMode: "mentions",
-        wasMentioned: false,
-        groupActivated: false,
-      }),
-    ).toBe(true);
+describe("createAckReactionHandle", () => {
+  it("tracks a successful ack send", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const remove = vi.fn().mockResolvedValue(undefined);
 
-    expect(
-      shouldAckReactionForWhatsApp({
-        emoji: "👀",
-        isDirect: true,
-        isGroup: false,
-        directEnabled: false,
-        groupMode: "mentions",
-        wasMentioned: false,
-        groupActivated: false,
-      }),
-    ).toBe(false);
+    const handle = createAckReactionHandle({
+      ackReactionValue: " 👀 ",
+      send,
+      remove,
+    });
 
-    expect(
-      shouldAckReactionForWhatsApp({
-        emoji: "👀",
-        isDirect: false,
-        isGroup: true,
-        directEnabled: true,
-        groupMode: "always",
-        wasMentioned: false,
-        groupActivated: false,
-      }),
-    ).toBe(true);
-
-    expect(
-      shouldAckReactionForWhatsApp({
-        emoji: "👀",
-        isDirect: false,
-        isGroup: true,
-        directEnabled: true,
-        groupMode: "never",
-        wasMentioned: true,
-        groupActivated: true,
-      }),
-    ).toBe(false);
+    expect(handle?.ackReactionValue).toBe("👀");
+    expect(handle?.remove).toBe(remove);
+    expect(send).toHaveBeenCalledTimes(1);
+    await expect(handle?.ackReactionPromise).resolves.toBe(true);
   });
 
-  it("honors mentions or activation for group-mentions", () => {
-    expect(
-      shouldAckReactionForWhatsApp({
-        emoji: "👀",
-        isDirect: false,
-        isGroup: true,
-        directEnabled: true,
-        groupMode: "mentions",
-        wasMentioned: true,
-        groupActivated: false,
-      }),
-    ).toBe(true);
+  it("tracks a failed ack send without throwing", async () => {
+    const error = new Error("nope");
+    const onSendError = vi.fn();
 
-    expect(
-      shouldAckReactionForWhatsApp({
-        emoji: "👀",
-        isDirect: false,
-        isGroup: true,
-        directEnabled: true,
-        groupMode: "mentions",
-        wasMentioned: false,
-        groupActivated: true,
-      }),
-    ).toBe(true);
+    const handle = createAckReactionHandle({
+      ackReactionValue: "👀",
+      send: vi.fn().mockRejectedValue(error),
+      remove: vi.fn().mockResolvedValue(undefined),
+      onSendError,
+    });
 
-    expect(
-      shouldAckReactionForWhatsApp({
-        emoji: "👀",
-        isDirect: false,
-        isGroup: true,
-        directEnabled: true,
-        groupMode: "mentions",
-        wasMentioned: false,
-        groupActivated: false,
-      }),
-    ).toBe(false);
+    await expect(handle?.ackReactionPromise).resolves.toBe(false);
+    expect(onSendError).toHaveBeenCalledWith(error);
+  });
+
+  it("skips empty ack values", () => {
+    const handle = createAckReactionHandle({
+      ackReactionValue: " ",
+      send: vi.fn().mockResolvedValue(undefined),
+      remove: vi.fn().mockResolvedValue(undefined),
+    });
+
+    expect(handle).toBeNull();
   });
 });
 
 describe("removeAckReactionAfterReply", () => {
-  it("removes only when ack succeeded", async () => {
-    const remove = vi.fn().mockResolvedValue(undefined);
-    const onError = vi.fn();
-    removeAckReactionAfterReply({
-      removeAfterReply: true,
-      ackReactionPromise: Promise.resolve(true),
-      ackReactionValue: "👀",
-      remove,
-      onError,
-    });
-    await sleep(0);
-    expect(remove).toHaveBeenCalledTimes(1);
-    expect(onError).not.toHaveBeenCalled();
-  });
-
   it("skips removal when ack did not happen", async () => {
     const remove = vi.fn().mockResolvedValue(undefined);
     removeAckReactionAfterReply({
@@ -251,19 +163,27 @@ describe("removeAckReactionAfterReply", () => {
       ackReactionValue: "👀",
       remove,
     });
-    await sleep(0);
+    await flushMicrotasks();
     expect(remove).not.toHaveBeenCalled();
   });
+});
 
-  it("skips when not configured", async () => {
+describe("removeAckReactionHandleAfterReply", () => {
+  it("removes through an ack handle", async () => {
     const remove = vi.fn().mockResolvedValue(undefined);
-    removeAckReactionAfterReply({
-      removeAfterReply: false,
-      ackReactionPromise: Promise.resolve(true),
-      ackReactionValue: "👀",
-      remove,
+    const onError = vi.fn();
+    removeAckReactionHandleAfterReply({
+      removeAfterReply: true,
+      onError,
+      ackReaction: {
+        ackReactionPromise: Promise.resolve(true),
+        ackReactionValue: "👀",
+        remove,
+      },
     });
-    await sleep(0);
-    expect(remove).not.toHaveBeenCalled();
+
+    await flushMicrotasks();
+    expect(remove).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
   });
 });

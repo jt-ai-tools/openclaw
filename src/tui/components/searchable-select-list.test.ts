@@ -1,5 +1,12 @@
-import { describe, expect, it } from "vitest";
-import { SearchableSelectList, type SearchableSelectListTheme } from "./searchable-select-list.js";
+// Searchable select list tests cover filtering and selection behavior.
+import { CURSOR_MARKER, visibleWidth } from "@earendil-works/pi-tui";
+import { describe, expect, it, vi } from "vitest";
+import { stripAnsi } from "../../../packages/terminal-core/src/ansi.js";
+import {
+  SearchableSelectList,
+  type SearchableSelectItem,
+  type SearchableSelectListTheme,
+} from "./searchable-select-list.js";
 
 const mockTheme: SearchableSelectListTheme = {
   selectedPrefix: (t) => `[${t}]`,
@@ -10,6 +17,17 @@ const mockTheme: SearchableSelectListTheme = {
   searchPrompt: (t) => `>${t}<`,
   searchInput: (t) => `|${t}|`,
   matchHighlight: (t) => `*${t}*`,
+};
+
+const ansiHighlightTheme: SearchableSelectListTheme = {
+  selectedPrefix: (t) => t,
+  selectedText: (t) => t,
+  description: (t) => t,
+  scrollInfo: (t) => t,
+  noMatch: (t) => t,
+  searchPrompt: (t) => t,
+  searchInput: (t) => t,
+  matchHighlight: (t) => `\u001b[31m${t}\u001b[0m`,
 };
 
 const testItems = [
@@ -29,181 +47,169 @@ const testItems = [
 ];
 
 describe("SearchableSelectList", () => {
-  it("renders all items when no filter is applied", () => {
-    const list = new SearchableSelectList(testItems, 5, mockTheme);
-    const output = list.render(80);
-
-    // Should have search prompt line, spacer, and items
-    expect(output.length).toBeGreaterThanOrEqual(3);
-    expect(output[0]).toContain("search");
+  it("keeps replacement empty-state errors on one safe terminal row", () => {
+    const list = new SearchableSelectList([], 7, ansiHighlightTheme);
+    list.setItems([], "network\nunavailable\u001b[2J");
+    expect(list.render(80).at(-1)).toBe("  network unavailable");
   });
 
-  it("filters items when typing", () => {
-    const list = new SearchableSelectList(testItems, 5, mockTheme);
+  function selectByEnter(list: SearchableSelectList) {
+    const onSelect = vi.fn<(item: SearchableSelectItem) => void>();
+    list.onSelect = onSelect;
+    list.handleInput("\r");
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    return onSelect.mock.calls[0]?.[0];
+  }
 
-    // Simulate typing "gemini" - unique enough to narrow down
-    list.handleInput("g");
-    list.handleInput("e");
-    list.handleInput("m");
-    list.handleInput("i");
-    list.handleInput("n");
-    list.handleInput("i");
-
-    const selected = list.getSelectedItem();
-    expect(selected?.value).toBe("google/gemini-pro");
-  });
-
-  it("prioritizes exact substring matches over fuzzy matches", () => {
-    // Add items where one has early exact match, others are fuzzy or late matches
-    const items = [
-      { value: "openrouter/auto", label: "openrouter/auto", description: "Routes to best" },
-      { value: "opus-direct", label: "opus-direct", description: "Direct opus model" },
-      {
-        value: "anthropic/claude-3-opus",
-        label: "anthropic/claude-3-opus",
-        description: "Claude 3 Opus",
-      },
-    ];
-    const list = new SearchableSelectList(items, 5, mockTheme);
-
-    // Type "opus" - should match "opus-direct" first (earliest exact substring)
-    for (const ch of "opus") {
+  function typeInput(list: SearchableSelectList, text: string) {
+    for (const ch of text) {
       list.handleInput(ch);
     }
+  }
 
-    // First result should be "opus-direct" where "opus" appears at position 0
-    const selected = list.getSelectedItem();
-    expect(selected?.value).toBe("opus-direct");
+  it("emits the hardware cursor marker only while the search input is focused", () => {
+    const list = new SearchableSelectList(testItems, 5, mockTheme);
+
+    expect(list.focused).toBe(false);
+    expect(list.render(80)[0]).not.toContain(CURSOR_MARKER);
+
+    list.focused = true;
+    expect(list.focused).toBe(true);
+    expect(list.render(80)[0]).toContain(CURSOR_MARKER);
+
+    list.focused = false;
+    expect(list.focused).toBe(false);
+    expect(list.render(80)[0]).not.toContain(CURSOR_MARKER);
   });
 
-  it("keeps exact label matches ahead of description matches", () => {
-    const longPrefix = "x".repeat(250);
-    const items = [
-      { value: "late-label", label: `${longPrefix}opus`, description: "late exact match" },
-      { value: "desc-first", label: "provider/other", description: "opus in description" },
-    ];
-    const list = new SearchableSelectList(items, 5, mockTheme);
-
-    for (const ch of "opus") {
-      list.handleInput(ch);
-    }
-
-    const selected = list.getSelectedItem();
-    expect(selected?.value).toBe("late-label");
-  });
-
-  it("exact label match beats description match", () => {
+  it("keeps ANSI, CJK, scroll, and no-match rows within seven terminal columns", () => {
+    const width = 7;
     const items = [
       {
-        value: "provider/other",
-        label: "provider/other",
-        description: "This mentions opus in description",
+        value: "cjk",
+        label: "\u001b[32m日本語の検索結果\u001b[0m",
+        description: "長い説明と表示幅の検証",
       },
-      { value: "provider/opus-model", label: "provider/opus-model", description: "Something else" },
+      { value: "other", label: "another long search result" },
     ];
+    const list = new SearchableSelectList(items, 1, ansiHighlightTheme);
+    list.focused = true;
+
+    for (const line of list.render(width)) {
+      expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+    }
+
+    list.handleInput("missing");
+    for (const line of list.render(width)) {
+      expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+    }
+  });
+
+  it("does not truncate long labels on wide terminals when description is present", () => {
+    const tail = "__TAIL__";
+    const longLabel = `session-${"x".repeat(40)}${tail}`; // > 30 chars; tail would be lost before PR
+    const items = [{ value: longLabel, label: longLabel, description: "desc" }];
     const list = new SearchableSelectList(items, 5, mockTheme);
 
-    for (const ch of "opus") {
-      list.handleInput(ch);
-    }
-
-    // Label match should win over description match
-    const selected = list.getSelectedItem();
-    expect(selected?.value).toBe("provider/opus-model");
+    const output = list.render(120).join("\n");
+    expect(output).toContain(tail);
   });
 
-  it("orders description matches by earliest index", () => {
-    const items = [
-      { value: "first", label: "first", description: "prefix opus value" },
-      { value: "second", label: "second", description: "opus suffix value" },
-    ];
-    const list = new SearchableSelectList(items, 5, mockTheme);
-
-    for (const ch of "opus") {
-      list.handleInput(ch);
-    }
-
-    const selected = list.getSelectedItem();
-    expect(selected?.value).toBe("second");
-  });
-
-  it("filters items with fuzzy matching", () => {
-    const list = new SearchableSelectList(testItems, 5, mockTheme);
-
-    // Simulate typing "gpt" which should match openai/gpt-4 models
-    list.handleInput("g");
-    list.handleInput("p");
-    list.handleInput("t");
-
-    const selected = list.getSelectedItem();
-    expect(selected?.value).toContain("gpt");
-  });
-
-  it("preserves fuzzy ranking when only fuzzy matches exist", () => {
-    const items = [
-      { value: "xg---4", label: "xg---4", description: "Worse fuzzy match" },
-      { value: "gpt-4", label: "gpt-4", description: "Better fuzzy match" },
-    ];
-    const list = new SearchableSelectList(items, 5, mockTheme);
-
-    for (const ch of "g4") {
-      list.handleInput(ch);
-    }
-
-    const selected = list.getSelectedItem();
-    expect(selected?.value).toBe("gpt-4");
-  });
-
-  it("highlights matches in rendered output", () => {
-    const list = new SearchableSelectList(testItems, 5, mockTheme);
-
-    for (const ch of "gpt") {
-      list.handleInput(ch);
-    }
-
-    const output = list.render(80).join("\n");
-    expect(output).toContain("*gpt*");
-  });
-
-  it("shows no match message when filter yields no results", () => {
-    const list = new SearchableSelectList(testItems, 5, mockTheme);
-
-    // Type something that won't match
-    list.handleInput("x");
-    list.handleInput("y");
-    list.handleInput("z");
-
-    const output = list.render(80);
-    expect(output.some((line) => line.includes("No matches"))).toBe(true);
-  });
-
-  it("navigates with arrow keys", () => {
-    const list = new SearchableSelectList(testItems, 5, mockTheme);
-
-    // Initially first item is selected
-    expect(list.getSelectedItem()?.value).toBe("anthropic/claude-3-opus");
-
-    // Press down arrow (escape sequence for down arrow)
+  it("omits the description layout at width 40", () => {
+    const list = new SearchableSelectList(
+      [
+        { value: "one", label: "one", description: "desc" },
+        { value: "two", label: "two", description: "desc" },
+      ],
+      5,
+      mockTheme,
+    );
+    // Use the non-selected description's style to observe the layout boundary.
     list.handleInput("\x1b[B");
-
-    expect(list.getSelectedItem()?.value).toBe("anthropic/claude-3-sonnet");
+    expect(list.render(40).join("\n")).not.toContain("(desc)");
   });
 
-  it("calls onSelect when enter is pressed", () => {
-    const list = new SearchableSelectList(testItems, 5, mockTheme);
-    let selectedValue: string | undefined;
+  it("does not corrupt ANSI sequences when highlighting repeated query tokens", () => {
+    const items = [{ value: "gpt-model", label: "gpt-model" }];
+    const list = new SearchableSelectList(items, 5, ansiHighlightTheme);
 
+    typeInput(list, "  gpt GPT m  ");
+
+    const rendered = list.render(80);
+    const renderedLine = rendered.find((line) => stripAnsi(line).includes("gpt-model"));
+    if (!renderedLine) {
+      throw new Error("expected rendered gpt-model line");
+    }
+    const highlightOpens = renderedLine.split("\u001b[31m").length - 1;
+    expect(highlightOpens).toBe(2);
+    expect(list.render(80)).toEqual(rendered);
+  });
+
+  it("renders the current query after clearing and replacing it", () => {
+    const list = new SearchableSelectList(
+      [{ value: "match", label: "alpha beta", description: "alpha beta description" }],
+      5,
+      ansiHighlightTheme,
+    );
+    list.handleInput("alpha");
+    list.render(80);
+    list.handleInput("\u0015");
+    const cleared = list.render(80).join("\n");
+    list.handleInput("beta");
+    const replaced = list.render(80).join("\n");
+
+    expect(cleared).not.toContain("\u001b[31m");
+    expect(replaced.split("alpha \u001b[31mbeta\u001b[0m")).toHaveLength(3);
+    expect(list.render(80).join("\n")).toBe(replaced);
+  });
+
+  it("sanitizes rendered fields before applying trusted highlighting", () => {
+    const attacks = [
+      "\u001b[38;5;201m",
+      "\u001b[3J",
+      "\u001b]0;search-title\u0007",
+      "\u001b]52;c;search-clipboard\u0007",
+      "\u009b2K",
+      "\u009d0;search-c1-title\u009c",
+    ];
+    const rawValue = `selector-value-start${attacks[1]}selector-value-end\r\nمرحبا\tשלום`;
+    const description = `selector-description-start${attacks[3]}selector-description-end\n東京`;
+    const list = new SearchableSelectList(
+      [
+        {
+          value: rawValue,
+          label: attacks.join(""),
+          description,
+          searchText: "selector-target",
+        },
+      ],
+      5,
+      ansiHighlightTheme,
+    );
+    let selectedValue: string | undefined;
     list.onSelect = (item) => {
       selectedValue = item.value;
     };
 
-    // Press enter
-    list.handleInput("\r");
+    typeInput(list, "selector");
+    const rendered = list.render(160).join("\n");
+    const plainRendered = stripAnsi(rendered);
 
-    expect(selectedValue).toBe("anthropic/claude-3-opus");
+    expect(rendered).toContain("\u001b[31mselector\u001b[0m-value-start");
+    expect(plainRendered).toContain("selector-description-startselector-description-end 東京");
+    expect(plainRendered).toContain("مرحبا שלום");
+    expect(plainRendered).toContain("\u2067");
+    expect(plainRendered).toContain("\u2069");
+    for (const attack of attacks) {
+      expect(rendered).not.toContain(attack);
+    }
+    expect(rendered).not.toContain("selector-value-end\r\nمرحبا\tשלום");
+
+    list.handleInput("\r");
+    expect(selectedValue).toBe(rawValue);
   });
 
-  it("calls onCancel when escape is pressed", () => {
+  it("cancels an active query with modifyOtherKeys Ctrl+C", () => {
     const list = new SearchableSelectList(testItems, 5, mockTheme);
     let cancelled = false;
 
@@ -211,9 +217,11 @@ describe("SearchableSelectList", () => {
       cancelled = true;
     };
 
-    // Press escape
-    list.handleInput("\x1b");
+    typeInput(list, "gemini");
+    const selected = selectByEnter(list);
+    list.handleInput("\x1b[27;5;99~");
 
     expect(cancelled).toBe(true);
+    expect(selectByEnter(list)).toBe(selected);
   });
 });

@@ -1,92 +1,68 @@
-import fs from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
-import { describe, expect, it, vi } from "vitest";
-import { CronService } from "./service.js";
+import { expect, it, vi } from "vitest";
+import { createTestGatewayScheduler } from "../test-utils/gateway-scheduler-clock.js";
+import {
+  createCronStoreHarness,
+  createNoopLogger,
+  withCronServiceForTest,
+} from "./service.test-harness.js";
 
-const noopLogger = {
-  debug: vi.fn(),
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-};
+const { makeStorePath } = createCronStoreHarness({ prefix: "openclaw-cron-delivery-" });
 
-async function makeStorePath() {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-cron-delivery-"));
-  return {
-    storePath: path.join(dir, "cron", "jobs.json"),
-    cleanup: async () => {
-      await fs.rm(dir, { recursive: true, force: true });
+it("records delivered delivery without a duplicate relay", async () => {
+  await withCronServiceForTest(
+    {
+      makeStorePath,
+      scheduler: createTestGatewayScheduler(),
+      logger: createNoopLogger(),
+      cronEnabled: false,
+      runIsolatedAgentJob: vi.fn(async () => ({
+        status: "ok" as const,
+        summary: "done",
+        delivered: true,
+      })),
     },
-  };
-}
+    async ({ cron, enqueueSystemEvent, requestHeartbeat }) => {
+      const job = await cron.add({
+        name: "announce-delivered",
+        enabled: true,
+        schedule: { kind: "every", everyMs: 60_000, anchorMs: Date.now() },
+        sessionTarget: "isolated",
+        wakeMode: "now",
+        payload: { kind: "agentTurn", message: "hello" },
+        delivery: { mode: "announce", channel: "telegram", to: "123" },
+      });
+      expect(await cron.run(job.id, "force")).toEqual({ ok: true, ran: true });
+      expect(enqueueSystemEvent).not.toHaveBeenCalled();
+      expect(requestHeartbeat).not.toHaveBeenCalled();
+      expect(cron.getJob(job.id)?.state.lastDeliveryStatus).toBe("delivered");
+    },
+  );
+});
 
-describe("CronService delivery plan consistency", () => {
-  it("does not post isolated summary when legacy deliver=false", async () => {
-    const store = await makeStorePath();
-    const enqueueSystemEvent = vi.fn();
-    const cron = new CronService({
-      cronEnabled: true,
-      storePath: store.storePath,
-      log: noopLogger,
-      enqueueSystemEvent,
-      requestHeartbeatNow: vi.fn(),
-      runIsolatedAgentJob: vi.fn(async () => ({ status: "ok", summary: "done" })),
-    });
-    await cron.start();
-    const job = await cron.add({
-      name: "legacy-off",
-      schedule: { kind: "every", everyMs: 60_000, anchorMs: Date.now() },
-      sessionTarget: "isolated",
-      wakeMode: "next-heartbeat",
-      payload: {
-        kind: "agentTurn",
-        message: "hello",
-        deliver: false,
-      },
-    });
-
-    const result = await cron.run(job.id, "force");
-    expect(result).toEqual({ ok: true, ran: true });
-    expect(enqueueSystemEvent).not.toHaveBeenCalled();
-
-    cron.stop();
-    await store.cleanup();
-  });
-
-  it("treats delivery object without mode as announce", async () => {
-    const store = await makeStorePath();
-    const enqueueSystemEvent = vi.fn();
-    const cron = new CronService({
-      cronEnabled: true,
-      storePath: store.storePath,
-      log: noopLogger,
-      enqueueSystemEvent,
-      requestHeartbeatNow: vi.fn(),
-      runIsolatedAgentJob: vi.fn(async () => ({ status: "ok", summary: "done" })),
-    });
-    await cron.start();
-    const job = await cron.add({
-      name: "partial-delivery",
-      schedule: { kind: "every", everyMs: 60_000, anchorMs: Date.now() },
-      sessionTarget: "isolated",
-      wakeMode: "next-heartbeat",
-      payload: {
-        kind: "agentTurn",
-        message: "hello",
-      },
-      delivery: { channel: "telegram", to: "123" } as unknown as {
-        mode: "none" | "announce";
-        channel?: string;
-        to?: string;
-      },
-    });
-
-    const result = await cron.run(job.id, "force");
-    expect(result).toEqual({ ok: true, ran: true });
-    expect(enqueueSystemEvent).toHaveBeenCalledWith("Cron: done", { agentId: undefined });
-
-    cron.stop();
-    await store.cleanup();
-  });
+it("rejects an authored delivery object without a mode", async () => {
+  await withCronServiceForTest(
+    {
+      makeStorePath,
+      scheduler: createTestGatewayScheduler(),
+      logger: createNoopLogger(),
+      cronEnabled: false,
+    },
+    async ({ cron, enqueueSystemEvent }) => {
+      const delivery = { mode: "announce" as const, channel: "telegram", to: "123" };
+      Reflect.deleteProperty(delivery, "mode");
+      await expect(
+        cron.add({
+          name: "partial-delivery",
+          enabled: true,
+          schedule: { kind: "every", everyMs: 60_000, anchorMs: Date.now() },
+          sessionTarget: "isolated",
+          wakeMode: "next-heartbeat",
+          payload: { kind: "agentTurn", message: "hello" },
+          delivery,
+        }),
+      ).rejects.toThrow("delivery requires an explicit mode");
+      expect(await cron.list()).toEqual([]);
+      expect(enqueueSystemEvent).not.toHaveBeenCalled();
+    },
+  );
 });

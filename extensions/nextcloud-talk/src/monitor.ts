@@ -1,246 +1,334 @@
-import type { RuntimeEnv } from "openclaw/plugin-sdk";
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type {
-  CoreConfig,
-  NextcloudTalkInboundMessage,
-  NextcloudTalkWebhookPayload,
-  NextcloudTalkWebhookServerOptions,
-} from "./types.js";
-import { resolveNextcloudTalkAccount } from "./accounts.js";
-import { handleNextcloudTalkInbound } from "./inbound.js";
-import { getNextcloudTalkRuntime } from "./runtime.js";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
+import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
+import { createPluginRuntimeStore } from "openclaw/plugin-sdk/runtime-store";
+import {
+  WEBHOOK_RATE_LIMIT_DEFAULTS,
+  createAuthRateLimiter,
+  createWebhookInFlightLimiter,
+  getWebhookLegacyListener,
+  isRequestBodyLimitError,
+  readRequestBodyWithLimit,
+  resolveRequestClientIp,
+  requestBodyErrorToText,
+} from "openclaw/plugin-sdk/webhook-ingress";
+import { sendHttpRequestRejection } from "openclaw/plugin-sdk/webhook-request-guards";
+import {
+  canonicalizeWebhookRouteKey,
+  registerPluginHttpRoute,
+  registerWebhookTarget,
+  resolveSingleWebhookTarget,
+} from "openclaw/plugin-sdk/webhook-targets";
 import { extractNextcloudTalkHeaders, verifyNextcloudTalkSignature } from "./signature.js";
+import type { NextcloudTalkWebhookTarget } from "./types.js";
+import { NextcloudTalkWebhookPayloadError } from "./webhook-spool-state.js";
 
-const DEFAULT_WEBHOOK_PORT = 8788;
-const DEFAULT_WEBHOOK_HOST = "0.0.0.0";
-const DEFAULT_WEBHOOK_PATH = "/nextcloud-talk-webhook";
-const HEALTH_PATH = "/healthz";
-
-function formatError(err: unknown): string {
-  if (err instanceof Error) {
-    return err.message;
+const PREAUTH_WEBHOOK_MAX_BODY_BYTES = 64 * 1024;
+const NEXTCLOUD_TALK_WEBHOOK_ACCEPTED_HEADER = "x-openclaw-delivery-accepted";
+const NEXTCLOUD_TALK_WEBHOOK_ACCEPTED_VALUE = "durable";
+const PREAUTH_WEBHOOK_BODY_TIMEOUT_MS = 5_000;
+// Bound concurrent unauthenticated body reads. Incomplete requests would otherwise
+// occupy readers and sockets for the full pre-auth timeout without ever consuming
+// the authentication-failure budget.
+const PREAUTH_WEBHOOK_MAX_IN_FLIGHT = 64;
+const WEBHOOK_IN_FLIGHT_KEY = "nextcloud-talk-webhook";
+const WEBHOOK_AUTH_RATE_LIMIT_SCOPE = "nextcloud-talk-webhook-auth";
+function writeWebhookError(res: ServerResponse, status: number, error: string): void {
+  if (res.headersSent) {
+    return;
   }
-  return typeof err === "string" ? err : JSON.stringify(err);
+  res.writeHead(status, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error }));
 }
 
-function parseWebhookPayload(body: string): NextcloudTalkWebhookPayload | null {
-  try {
-    const data = JSON.parse(body);
-    if (
-      !data.type ||
-      !data.actor?.type ||
-      !data.actor?.id ||
-      !data.object?.type ||
-      !data.object?.id ||
-      !data.target?.type ||
-      !data.target?.id
-    ) {
-      return null;
-    }
-    return data as NextcloudTalkWebhookPayload;
-  } catch {
-    return null;
+async function rejectWebhookRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  status: number,
+  error: string,
+): Promise<void> {
+  if (res.headersSent) {
+    return;
   }
+  await sendHttpRequestRejection(req, res, status, JSON.stringify({ error }), "application/json");
 }
 
-function payloadToInboundMessage(
-  payload: NextcloudTalkWebhookPayload,
-): NextcloudTalkInboundMessage {
-  // Payload doesn't indicate DM vs room; mark as group and let inbound handler refine.
-  const isGroupChat = true;
-
-  return {
-    messageId: String(payload.object.id),
-    roomToken: payload.target.id,
-    roomName: payload.target.name,
-    senderId: payload.actor.id,
-    senderName: payload.actor.name ?? "",
-    text: payload.object.content || payload.object.name || "",
-    mediaType: payload.object.mediaType || "text/plain",
-    timestamp: Date.now(),
-    isGroupChat,
-  };
-}
-
-function readBody(req: IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer) => chunks.push(chunk));
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
-    req.on("error", reject);
-  });
-}
-
-export function createNextcloudTalkWebhookServer(opts: NextcloudTalkWebhookServerOptions): {
-  server: Server;
-  start: () => Promise<void>;
-  stop: () => void;
-} {
-  const { port, host, path, secret, onMessage, onError, abortSignal } = opts;
-
-  const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-    if (req.url === HEALTH_PATH) {
-      res.writeHead(200, { "Content-Type": "text/plain" });
-      res.end("ok");
-      return;
-    }
-
-    if (req.url !== path || req.method !== "POST") {
-      res.writeHead(404);
-      res.end();
-      return;
-    }
-
-    try {
-      const body = await readBody(req);
-
-      const headers = extractNextcloudTalkHeaders(
-        req.headers as Record<string, string | string[] | undefined>,
-      );
-      if (!headers) {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Missing signature headers" }));
-        return;
-      }
-
-      const isValid = verifyNextcloudTalkSignature({
-        signature: headers.signature,
-        random: headers.random,
-        body,
-        secret,
-      });
-
-      if (!isValid) {
-        res.writeHead(401, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Invalid signature" }));
-        return;
-      }
-
-      const payload = parseWebhookPayload(body);
-      if (!payload) {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Invalid payload format" }));
-        return;
-      }
-
-      if (payload.type !== "Create") {
-        res.writeHead(200);
-        res.end();
-        return;
-      }
-
-      const message = payloadToInboundMessage(payload);
-
-      res.writeHead(200);
-      res.end();
-
-      try {
-        await onMessage(message);
-      } catch (err) {
-        onError?.(err instanceof Error ? err : new Error(formatError(err)));
-      }
-    } catch (err) {
-      const error = err instanceof Error ? err : new Error(formatError(err));
-      onError?.(error);
-      if (!res.headersSent) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Internal server error" }));
-      }
-    }
-  });
-
-  const start = (): Promise<void> => {
-    return new Promise((resolve) => {
-      server.listen(port, host, () => resolve());
-    });
-  };
-
-  const stop = () => {
-    server.close();
-  };
-
-  if (abortSignal) {
-    abortSignal.addEventListener("abort", stop, { once: true });
-  }
-
-  return { server, start, stop };
-}
-
-export type NextcloudTalkMonitorOptions = {
-  accountId?: string;
-  config?: CoreConfig;
-  runtime?: RuntimeEnv;
-  abortSignal?: AbortSignal;
-  onMessage?: (message: NextcloudTalkInboundMessage) => void | Promise<void>;
-  statusSink?: (patch: { lastInboundAt?: number; lastOutboundAt?: number }) => void;
+type RegisteredNextcloudTalkWebhookTarget = NextcloudTalkWebhookTarget & {
+  rawPath: string;
+  stopping: boolean;
+  pendingResponses: Set<Promise<void>>;
+  gatewayGuards: ReturnType<typeof createWebhookGuards>;
+  legacyGuards?: ReturnType<typeof createWebhookGuards>;
 };
 
-export async function monitorNextcloudTalkProvider(
-  opts: NextcloudTalkMonitorOptions,
-): Promise<{ stop: () => void }> {
-  const core = getNextcloudTalkRuntime();
-  const cfg = opts.config ?? (core.config.loadConfig() as CoreConfig);
-  const account = resolveNextcloudTalkAccount({
-    cfg,
-    accountId: opts.accountId,
-  });
-  const runtime: RuntimeEnv = opts.runtime ?? {
-    log: (message: string) => core.logging.getChildLogger().info(message),
-    error: (message: string) => core.logging.getChildLogger().error(message),
-    exit: () => {
-      throw new Error("Runtime exit not available");
-    },
+function createWebhookGuards() {
+  return {
+    authRateLimiter: createAuthRateLimiter({
+      maxAttempts: WEBHOOK_RATE_LIMIT_DEFAULTS.maxRequests,
+      windowMs: WEBHOOK_RATE_LIMIT_DEFAULTS.windowMs,
+      lockoutMs: WEBHOOK_RATE_LIMIT_DEFAULTS.windowMs,
+      exemptLoopback: false,
+      pruneIntervalMs: WEBHOOK_RATE_LIMIT_DEFAULTS.windowMs,
+    }),
+    inFlightLimiter: createWebhookInFlightLimiter({
+      maxInFlightPerKey: PREAUTH_WEBHOOK_MAX_IN_FLIGHT,
+      maxTrackedKeys: 1,
+    }),
   };
+}
 
-  if (!account.secret) {
-    throw new Error(`Nextcloud Talk bot secret not configured for account "${account.accountId}"`);
+async function handleWebhookRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  targetsByPath: Map<string, RegisteredNextcloudTalkWebhookTarget[]>,
+  path: string,
+): Promise<void> {
+  const legacyListener = getWebhookLegacyListener(req);
+  const requestTargets = (targetsByPath.get(path) ?? []).filter(
+    (entry) =>
+      entry.rawPath === req.url &&
+      (!legacyListener ||
+        (entry.legacyListener?.port === legacyListener.port &&
+          entry.legacyListener.host === legacyListener.host)),
+  );
+  if (req.method !== "POST" || requestTargets.length === 0) {
+    res.writeHead(404);
+    res.end();
+    return;
+  }
+  const servingTargets = requestTargets.filter((entry) => !entry.stopping);
+  const firstTarget = servingTargets[0];
+  if (!firstTarget) {
+    res.writeHead(503, { "Retry-After": "1" });
+    res.end();
+    return;
+  }
+  const responseOwners = new Map<RegisteredNextcloudTalkWebhookTarget, () => void>();
+  // Authentication selects the account after upload; until then each candidate owns the read.
+  if (!res.destroyed && !res.writableFinished) {
+    for (const entry of servingTargets) {
+      const responseDone = createDeferred<void>();
+      entry.pendingResponses.add(responseDone.promise);
+      responseOwners.set(entry, () => {
+        entry.pendingResponses.delete(responseDone.promise);
+        responseOwners.delete(entry);
+        responseDone.resolve();
+      });
+    }
+    const complete = () => {
+      res.off("finish", complete);
+      res.off("close", complete);
+      for (const release of responseOwners.values()) {
+        release();
+      }
+    };
+    res.once("finish", complete);
+    res.once("close", complete);
+  }
+  const guards = legacyListener ? firstTarget.legacyGuards : firstTarget.gatewayGuards;
+  if (!guards) {
+    res.writeHead(503, { "Retry-After": "1" });
+    res.end();
+    return;
+  }
+  const { authRateLimiter: webhookAuthRateLimiter, inFlightLimiter: webhookInFlightLimiter } =
+    guards;
+  const { onError, trustedProxies, allowRealIpFallback } = firstTarget;
+  const clientIp =
+    resolveRequestClientIp(req, trustedProxies, allowRealIpFallback) ??
+    req.socket.remoteAddress ??
+    "unknown";
+  if (!webhookAuthRateLimiter.check(clientIp, WEBHOOK_AUTH_RATE_LIMIT_SCOPE).allowed) {
+    res.writeHead(429);
+    res.end("Too Many Requests");
+    return;
   }
 
-  const port = account.config.webhookPort ?? DEFAULT_WEBHOOK_PORT;
-  const host = account.config.webhookHost ?? DEFAULT_WEBHOOK_HOST;
-  const path = account.config.webhookPath ?? DEFAULT_WEBHOOK_PATH;
+  // Acquire before the unauthenticated read so overflow requests are rejected
+  // immediately instead of pinning a reader for the full pre-auth timeout.
+  if (!webhookInFlightLimiter.tryAcquire(WEBHOOK_IN_FLIGHT_KEY)) {
+    // Close-aware rejection frees the socket instead of leaving it half-open.
+    await sendHttpRequestRejection(req, res, 429, "Too Many Requests");
+    return;
+  }
 
-  const logger = core.logging.getChildLogger({
-    channel: "nextcloud-talk",
-    accountId: account.accountId,
-  });
-
-  const { start, stop } = createNextcloudTalkWebhookServer({
-    port,
-    host,
-    path,
-    secret: account.secret,
-    onMessage: async (message) => {
-      core.channel.activity.record({
-        channel: "nextcloud-talk",
-        accountId: account.accountId,
-        direction: "inbound",
-        at: message.timestamp,
-      });
-      if (opts.onMessage) {
-        await opts.onMessage(message);
-        return;
+  let body: string;
+  let target: RegisteredNextcloudTalkWebhookTarget;
+  try {
+    const headers = extractNextcloudTalkHeaders(req.headers);
+    if (!headers) {
+      writeWebhookError(res, 400, "Missing signature headers");
+      return;
+    }
+    const targets = requestTargets.filter(
+      (entry) => !entry.isBackendAllowed || entry.isBackendAllowed(headers.backend),
+    );
+    if (targets.length === 0) {
+      writeWebhookError(res, 401, "Invalid backend");
+      return;
+    }
+    body = await readRequestBodyWithLimit(req, {
+      maxBytes: PREAUTH_WEBHOOK_MAX_BODY_BYTES,
+      timeoutMs: PREAUTH_WEBHOOK_BODY_TIMEOUT_MS,
+      // Send the rejection before closing an incomplete upload.
+      destroyOnLimit: false,
+    });
+    const matchesSignature = (entry: RegisteredNextcloudTalkWebhookTarget) =>
+      verifyNextcloudTalkSignature({ ...headers, body, secret: entry.secret });
+    const match = resolveSingleWebhookTarget(
+      targets,
+      (entry) => servingTargets.includes(entry) && matchesSignature(entry),
+    );
+    if (
+      match.kind === "none" &&
+      targets.some((entry) => !servingTargets.includes(entry) && matchesSignature(entry))
+    ) {
+      res.writeHead(503, { "Retry-After": "1" });
+      res.end();
+      return;
+    }
+    if (match.kind !== "single") {
+      webhookAuthRateLimiter.recordFailure(clientIp, WEBHOOK_AUTH_RATE_LIMIT_SCOPE);
+      writeWebhookError(res, 401, "Invalid signature");
+      return;
+    }
+    target = match.target;
+    for (const [entry, release] of responseOwners) {
+      if (entry !== target) {
+        release();
       }
-      await handleNextcloudTalkInbound({
-        message,
-        account,
-        config: cfg,
-        runtime,
-        statusSink: opts.statusSink,
-      });
-    },
-    onError: (error) => {
-      logger.error(`[nextcloud-talk:${account.accountId}] webhook error: ${error.message}`);
-    },
-    abortSignal: opts.abortSignal,
+    }
+    if (!targetsByPath.get(path)?.includes(target)) {
+      res.writeHead(503, { "Retry-After": "1" });
+      res.end();
+      return;
+    }
+    webhookAuthRateLimiter.reset(clientIp, WEBHOOK_AUTH_RATE_LIMIT_SCOPE);
+  } catch (err) {
+    if (isRequestBodyLimitError(err, "PAYLOAD_TOO_LARGE")) {
+      await rejectWebhookRequest(req, res, 413, "Payload too large");
+      return;
+    }
+    if (isRequestBodyLimitError(err, "REQUEST_BODY_TIMEOUT")) {
+      await rejectWebhookRequest(req, res, 408, requestBodyErrorToText("REQUEST_BODY_TIMEOUT"));
+      return;
+    }
+    const error = err instanceof Error ? err : new Error(formatErrorMessage(err));
+    onError?.(error);
+    writeWebhookError(res, 500, "Internal server error");
+    return;
+  } finally {
+    // Release before authenticated dispatch so a slow handler cannot exhaust
+    // the pre-auth admission budget for other deliveries.
+    webhookInFlightLimiter.release(WEBHOOK_IN_FLIGHT_KEY);
+  }
+
+  try {
+    // Nextcloud retries only a few times. Acknowledge only after the raw
+    // envelope is durably admitted; append failure must remain retryable.
+    const admission = await target.onWebhook(body);
+    if (admission === "accepted") {
+      // Ignored non-message events still receive 200 but must not claim
+      // durable adoption.
+      res.setHeader(NEXTCLOUD_TALK_WEBHOOK_ACCEPTED_HEADER, NEXTCLOUD_TALK_WEBHOOK_ACCEPTED_VALUE);
+    }
+    res.writeHead(200);
+    res.end();
+  } catch (err) {
+    if (err instanceof NextcloudTalkWebhookPayloadError) {
+      // Malformed envelopes are client errors, unlike failed durable admission.
+      writeWebhookError(res, 400, "Invalid payload format");
+      return;
+    }
+    const error = err instanceof Error ? err : new Error(formatErrorMessage(err));
+    target.onError?.(error);
+    writeWebhookError(res, 500, "Internal server error");
+  }
+}
+
+const webhookState = createPluginRuntimeStore<Map<string, RegisteredNextcloudTalkWebhookTarget[]>>({
+  key: "nextcloud-talk:webhook-routes",
+  errorMessage: "Nextcloud Talk webhook routes are not registered",
+});
+
+export function registerNextcloudTalkWebhook(
+  target: NextcloudTalkWebhookTarget,
+): () => Promise<void> {
+  let targets = webhookState.tryGetRuntime();
+  if (!targets) {
+    targets = new Map();
+    webhookState.setRuntime(targets);
+  }
+  const path = canonicalizeWebhookRouteKey(target.path);
+  // The live targets own limiter sharing: Gateway budgets belong to a path,
+  // while a compatibility port shares one budget across all of its paths.
+  const gatewayGuards = targets.get(path)?.[0]?.gatewayGuards ?? createWebhookGuards();
+  const endpoint = target.legacyListener;
+  const legacyGuards = endpoint
+    ? ([...targets.values()]
+        .flat()
+        .find(
+          (entry) =>
+            entry.legacyListener?.port === endpoint.port &&
+            entry.legacyListener.host === endpoint.host,
+        )?.legacyGuards ?? createWebhookGuards())
+    : undefined;
+  const registration = registerWebhookTarget(targets, {
+    ...target,
+    path,
+    rawPath: target.path,
+    stopping: false,
+    pendingResponses: new Set<Promise<void>>(),
+    gatewayGuards,
+    legacyGuards,
   });
-
-  await start();
-
-  const publicUrl =
-    account.config.webhookPublicUrl ??
-    `http://${host === "0.0.0.0" ? "localhost" : host}:${port}${path}`;
-  logger.info(`[nextcloud-talk:${account.accountId}] webhook listening on ${publicUrl}`);
-
-  return { stop };
+  const removeTarget = () => {
+    registration.unregister();
+    const remaining = [...targets.values()].flat();
+    for (const guards of [gatewayGuards, legacyGuards]) {
+      if (
+        guards &&
+        !remaining.some((entry) => entry.gatewayGuards === guards || entry.legacyGuards === guards)
+      ) {
+        guards.authRateLimiter.dispose();
+      }
+    }
+  };
+  try {
+    const unregister = registerPluginHttpRoute({
+      path,
+      auth: "plugin",
+      pluginId: "nextcloud-talk",
+      source: "webhook",
+      accountId: target.accountId,
+      handler: (req, res) => handleWebhookRequest(req, res, targets, path),
+      legacyListener: target.legacyListener
+        ? { ...target.legacyListener, health: { path: "/healthz", contentType: "text/plain" } }
+        : undefined,
+      reuseExistingSameOwner: true,
+      throwOnFailure: true,
+    });
+    let stopPromise: Promise<void> | undefined;
+    return () => {
+      if (stopPromise) {
+        return stopPromise;
+      }
+      registration.target.stopping = true;
+      const release = () => {
+        removeTarget();
+        unregister();
+      };
+      const pending = registration.target.pendingResponses;
+      if (pending.size === 0) {
+        release();
+        stopPromise = Promise.resolve();
+      } else {
+        stopPromise = Promise.all(pending).then(release);
+      }
+      return stopPromise;
+    };
+  } catch (error) {
+    removeTarget();
+    throw error;
+  }
 }

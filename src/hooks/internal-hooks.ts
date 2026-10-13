@@ -1,14 +1,23 @@
-/**
- * Hook system for OpenClaw agent events
- *
- * Provides an extensible event-driven hook system for agent events
- * like command processing, session lifecycle, etc.
- */
-
+import type { SessionsPatchParams } from "../../packages/gateway-protocol/src/schema/sessions.js";
 import type { WorkspaceBootstrapFile } from "../agents/workspace.js";
-import type { OpenClawConfig } from "../config/config.js";
-
-export type InternalHookEventType = "command" | "session" | "agent" | "gateway";
+import type { CliDeps } from "../cli/outbound-send-deps.js";
+import type { SessionEntry } from "../config/sessions/types.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { formatErrorMessage } from "../infra/errors.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
+import {
+  clearLegacyPluginInternalHooks,
+  listLegacyPluginInternalHookEventKeys,
+  listLegacyPluginInternalHooks,
+} from "../plugins/legacy-internal-hook-state.js";
+import { resolveGlobalSingleton } from "../shared/global-singleton.js";
+import type {
+  InternalHookEvent,
+  InternalHookEventType,
+  InternalHookHandler,
+} from "./internal-hook-types.js";
+import type { MessageHookMediaFact } from "./message-hook-media.js";
+export type { InternalHookEvent, InternalHookEventType, InternalHookHandler };
 
 export type AgentBootstrapHookContext = {
   workspaceDir: string;
@@ -25,45 +34,115 @@ export type AgentBootstrapHookEvent = InternalHookEvent & {
   context: AgentBootstrapHookContext;
 };
 
-export interface InternalHookEvent {
-  /** The type of event (command, session, agent, gateway, etc.) */
-  type: InternalHookEventType;
-  /** The specific action within the type (e.g., 'new', 'reset', 'stop') */
-  action: string;
-  /** The session key this event relates to */
-  sessionKey: string;
-  /** Additional context specific to the event */
-  context: Record<string, unknown>;
-  /** Timestamp when the event occurred */
-  timestamp: Date;
-  /** Messages to send back to the user (hooks can push to this array) */
-  messages: string[];
-}
+export type GatewayStartupHookContext = {
+  cfg?: OpenClawConfig;
+  deps?: CliDeps;
+  workspaceDir?: string;
+};
 
-export type InternalHookHandler = (event: InternalHookEvent) => Promise<void> | void;
+export type GatewayStartupHookEvent = InternalHookEvent & {
+  type: "gateway";
+  action: "startup";
+  context: GatewayStartupHookContext;
+};
 
-/** Registry of hook handlers by event key */
-const handlers = new Map<string, InternalHookHandler[]>();
+export type MessageReceivedHookContext = {
+  /** Sender identifier (e.g., phone number, user ID) */
+  from: string;
+  content: string;
+  /** Unix timestamp when the message was received */
+  timestamp?: number;
+  channelId: string;
+  /** Provider account ID for multi-account setups */
+  accountId?: string;
+  conversationId?: string;
+  /** Message ID from the provider */
+  messageId?: string;
+  /** Staged, locally usable attachments in stable source order. */
+  media?: MessageHookMediaFact[];
+  /** Original attachment facts when local staging has not completed yet. */
+  originalMedia?: MessageHookMediaFact[];
+  /** True when originalMedia is present but media is withheld pending staging. */
+  mediaStagingPending?: boolean;
+  /** Additional provider-specific metadata */
+  metadata?: Record<string, unknown>;
+};
 
-/**
- * Register a hook handler for a specific event type or event:action combination
- *
- * @param eventKey - Event type (e.g., 'command') or specific action (e.g., 'command:new')
- * @param handler - Function to call when the event is triggered
- *
- * @example
- * ```ts
- * // Listen to all command events
- * registerInternalHook('command', async (event) => {
- *   console.log('Command:', event.action);
- * });
- *
- * // Listen only to /new commands
- * registerInternalHook('command:new', async (event) => {
- *   await saveSessionToMemory(event);
- * });
- * ```
- */
+export type MessageSentHookContext = Pick<
+  MessageReceivedHookContext,
+  "content" | "channelId" | "accountId" | "conversationId" | "messageId"
+> & {
+  to: string;
+  success: boolean;
+  error?: string;
+  isGroup?: boolean;
+  groupId?: string;
+};
+
+type MessageEnrichedBodyHookContext = Pick<
+  MessageReceivedHookContext,
+  | "timestamp"
+  | "channelId"
+  | "conversationId"
+  | "messageId"
+  | "media"
+  | "originalMedia"
+  | "mediaStagingPending"
+> & {
+  /** Sender identifier (e.g., phone number, user ID) */
+  from?: string;
+  to?: string;
+  /** Original raw message body (e.g., "🎤 [Audio]") */
+  body?: string;
+  /** Enriched body shown to the agent, including transcript */
+  bodyForAgent?: string;
+  senderId?: string;
+  senderName?: string;
+  senderUsername?: string;
+  provider?: string;
+  surface?: string;
+  /** @deprecated Use `media?.[0]?.path`. */
+  mediaPath?: string;
+  /** @deprecated Use `media?.[0]?.contentType` or `.kind`. */
+  mediaType?: string;
+};
+
+export type MessageTranscribedHookContext = MessageEnrichedBodyHookContext & {
+  transcript: string;
+};
+
+export type MessagePreprocessedHookContext = MessageEnrichedBodyHookContext & {
+  transcript?: string;
+  isGroup?: boolean;
+  groupId?: string;
+};
+
+export type SessionPatchHookContext = {
+  sessionEntry: SessionEntry;
+  patch: SessionsPatchParams;
+  cfg: OpenClawConfig;
+};
+
+export type SessionPatchHookEvent = InternalHookEvent & {
+  type: "session";
+  action: "patch";
+  context: SessionPatchHookContext;
+};
+
+// Share registrations across copies of this module emitted into separate bundle chunks.
+const INTERNAL_HOOK_HANDLERS_KEY = Symbol.for("openclaw.internalHookHandlers");
+const handlers = resolveGlobalSingleton<Map<string, InternalHookHandler[]>>(
+  INTERNAL_HOOK_HANDLERS_KEY,
+  () => new Map<string, InternalHookHandler[]>(),
+);
+const INTERNAL_HOOKS_ENABLED_KEY = Symbol.for("openclaw.internalHooksEnabled");
+const internalHooksEnabledState = resolveGlobalSingleton<{ enabled: boolean }>(
+  INTERNAL_HOOKS_ENABLED_KEY,
+  () => ({ enabled: true }),
+);
+const log = createSubsystemLogger("internal-hooks");
+
+/** Register for a family (e.g. "command") or an exact action (e.g. "command:new"). */
 export function registerInternalHook(eventKey: string, handler: InternalHookHandler): void {
   if (!handlers.has(eventKey)) {
     handlers.set(eventKey, []);
@@ -71,12 +150,6 @@ export function registerInternalHook(eventKey: string, handler: InternalHookHand
   handlers.get(eventKey)!.push(handler);
 }
 
-/**
- * Unregister a specific hook handler
- *
- * @param eventKey - Event key the handler was registered for
- * @param handler - The handler function to remove
- */
 export function unregisterInternalHook(eventKey: string, handler: InternalHookHandler): void {
   const eventHandlers = handlers.get(eventKey);
   if (!eventHandlers) {
@@ -88,68 +161,57 @@ export function unregisterInternalHook(eventKey: string, handler: InternalHookHa
     eventHandlers.splice(index, 1);
   }
 
-  // Clean up empty handler arrays
   if (eventHandlers.length === 0) {
     handlers.delete(eventKey);
   }
 }
 
-/**
- * Clear all registered hooks (useful for testing)
- */
 export function clearInternalHooks(): void {
   handlers.clear();
+  clearLegacyPluginInternalHooks();
 }
 
-/**
- * Get all registered event keys (useful for debugging)
- */
+export function setInternalHooksEnabled(enabled: boolean): void {
+  internalHooksEnabledState.enabled = enabled;
+}
+
 export function getRegisteredEventKeys(): string[] {
-  return Array.from(handlers.keys());
+  return [...new Set([...handlers.keys(), ...listLegacyPluginInternalHookEventKeys()])];
 }
 
-/**
- * Trigger a hook event
- *
- * Calls all handlers registered for:
- * 1. The general event type (e.g., 'command')
- * 2. The specific event:action combination (e.g., 'command:new')
- *
- * Handlers are called in registration order. Errors are caught and logged
- * but don't prevent other handlers from running.
- *
- * @param event - The event to trigger
- */
+export function hasInternalHookListeners(type: InternalHookEventType, action: string): boolean {
+  return (
+    (handlers.get(type)?.length ?? 0) + listLegacyPluginInternalHooks(type).length > 0 ||
+    (handlers.get(`${type}:${action}`)?.length ?? 0) +
+      listLegacyPluginInternalHooks(`${type}:${action}`).length >
+      0
+  );
+}
+
+/** Dispatch family handlers before exact-action handlers, in registration order; isolate errors. */
 export async function triggerInternalHook(event: InternalHookEvent): Promise<void> {
-  const typeHandlers = handlers.get(event.type) ?? [];
-  const specificHandlers = handlers.get(`${event.type}:${event.action}`) ?? [];
-
-  const allHandlers = [...typeHandlers, ...specificHandlers];
-
-  if (allHandlers.length === 0) {
+  if (!internalHooksEnabledState.enabled) {
     return;
   }
+  // An admitted event finishes its snapshot even if a handler awaits across a reload or disable.
+  const specificKey = `${event.type}:${event.action}`;
+  const allHandlers = [
+    ...(handlers.get(event.type) ?? []),
+    ...listLegacyPluginInternalHooks(event.type),
+    ...(handlers.get(specificKey) ?? []),
+    ...listLegacyPluginInternalHooks(specificKey),
+  ];
 
   for (const handler of allHandlers) {
     try {
       await handler(event);
     } catch (err) {
-      console.error(
-        `Hook error [${event.type}:${event.action}]:`,
-        err instanceof Error ? err.message : String(err),
-      );
+      const message = formatErrorMessage(err);
+      log.error(`Hook error [${event.type}:${event.action}]: ${message}`);
     }
   }
 }
 
-/**
- * Create a hook event with common fields filled in
- *
- * @param type - The event type
- * @param action - The action within that type
- * @param sessionKey - The session key
- * @param context - Additional context
- */
 export function createInternalHookEvent(
   type: InternalHookEventType,
   action: string,
@@ -166,16 +228,42 @@ export function createInternalHookEvent(
   };
 }
 
+function hasHookEventContext(
+  event: InternalHookEvent,
+  type: InternalHookEventType,
+  action: string,
+): boolean {
+  return (
+    event.type === type &&
+    event.action === action &&
+    event.context !== null &&
+    typeof event.context === "object"
+  );
+}
+
 export function isAgentBootstrapEvent(event: InternalHookEvent): event is AgentBootstrapHookEvent {
-  if (event.type !== "agent" || event.action !== "bootstrap") {
+  return (
+    hasHookEventContext(event, "agent", "bootstrap") &&
+    typeof event.context.workspaceDir === "string" &&
+    Array.isArray(event.context.bootstrapFiles)
+  );
+}
+
+export function isGatewayStartupEvent(event: InternalHookEvent): event is GatewayStartupHookEvent {
+  return hasHookEventContext(event, "gateway", "startup");
+}
+
+export function isSessionPatchEvent(event: InternalHookEvent): event is SessionPatchHookEvent {
+  if (!hasHookEventContext(event, "session", "patch")) {
     return false;
   }
-  const context = event.context as Partial<AgentBootstrapHookContext> | null;
-  if (!context || typeof context !== "object") {
-    return false;
-  }
-  if (typeof context.workspaceDir !== "string") {
-    return false;
-  }
-  return Array.isArray(context.bootstrapFiles);
+  const context = event.context;
+  return (
+    typeof context.patch === "object" &&
+    context.patch !== null &&
+    typeof context.cfg === "object" &&
+    context.cfg !== null &&
+    typeof context.sessionEntry === "object" &&
+    context.sessionEntry !== null
+  );
 }

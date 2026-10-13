@@ -1,100 +1,65 @@
+import {
+  normalizeOptionalLowercaseString,
+  normalizeOptionalString,
+} from "../../packages/normalization-core/src/string-coerce.js";
 import type { CommandArgValues } from "./commands-registry.types.js";
 
-export type CommandArgsFormatter = (values: CommandArgValues) => string | undefined;
+type CommandArgsFormatter = (values: CommandArgValues) => string | undefined;
 
 function normalizeArgValue(value: unknown): string | undefined {
   if (value == null) {
     return undefined;
   }
-  let text: string;
   if (typeof value === "string") {
-    text = value.trim();
-  } else if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
-    text = String(value).trim();
-  } else if (typeof value === "symbol") {
-    text = value.toString().trim();
-  } else if (typeof value === "function") {
-    text = value.toString().trim();
-  } else {
-    // Objects and arrays
-    text = JSON.stringify(value);
+    return normalizeOptionalString(value);
   }
-  return text ? text : undefined;
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+    return normalizeOptionalString(String(value));
+  }
+  if (typeof value === "symbol" || typeof value === "function") {
+    return normalizeOptionalString(value.toString());
+  }
+  return JSON.stringify(value) || undefined;
 }
 
-const formatConfigArgs: CommandArgsFormatter = (values) => {
-  const action = normalizeArgValue(values.action)?.toLowerCase();
+function formatActionArgs(
+  values: CommandArgValues,
+  pathActions: readonly string[] = ["show", "get"],
+): string | undefined {
+  const action = normalizeOptionalLowercaseString(normalizeArgValue(values.action));
   const path = normalizeArgValue(values.path);
   const value = normalizeArgValue(values.value);
   if (!action) {
     return undefined;
   }
-  if (action === "show" || action === "get") {
-    return path ? `${action} ${path}` : action;
-  }
-  if (action === "unset") {
-    return path ? `${action} ${path}` : action;
-  }
-  if (action === "set") {
-    if (!path) {
-      return action;
-    }
-    if (!value) {
-      return `${action} ${path}`;
-    }
+  if (action === "set" && path && value) {
     return `${action} ${path}=${value}`;
   }
-  return action;
-};
+  const includesPath = action === "set" || action === "unset" || pathActions.includes(action);
+  return path && includesPath ? `${action} ${path}` : action;
+}
 
-const formatDebugArgs: CommandArgsFormatter = (values) => {
-  const action = normalizeArgValue(values.action)?.toLowerCase();
-  const path = normalizeArgValue(values.path);
-  const value = normalizeArgValue(values.value);
-  if (!action) {
-    return undefined;
-  }
-  if (action === "show" || action === "reset") {
-    return action;
-  }
-  if (action === "unset") {
-    return path ? `${action} ${path}` : action;
-  }
-  if (action === "set") {
-    if (!path) {
-      return action;
-    }
-    if (!value) {
-      return `${action} ${path}`;
-    }
-    return `${action} ${path}=${value}`;
-  }
-  return action;
-};
-
-const formatQueueArgs: CommandArgsFormatter = (values) => {
-  const mode = normalizeArgValue(values.mode);
-  const debounce = normalizeArgValue(values.debounce);
-  const cap = normalizeArgValue(values.cap);
-  const drop = normalizeArgValue(values.drop);
+function formatNamedArgs(
+  values: CommandArgValues,
+  names: readonly string[],
+  separator: string,
+  positional?: string,
+): string | undefined {
   const parts: string[] = [];
-  if (mode) {
-    parts.push(mode);
-  }
-  if (debounce) {
-    parts.push(`debounce:${debounce}`);
-  }
-  if (cap) {
-    parts.push(`cap:${cap}`);
-  }
-  if (drop) {
-    parts.push(`drop:${drop}`);
+  for (const name of names) {
+    const value = normalizeArgValue(values[name]);
+    if (value) {
+      parts.push(name === positional ? value : `${name}${separator}${value}`);
+    }
   }
   return parts.length > 0 ? parts.join(" ") : undefined;
-};
+}
 
 export const COMMAND_ARG_FORMATTERS: Record<string, CommandArgsFormatter> = {
-  config: formatConfigArgs,
-  debug: formatDebugArgs,
-  queue: formatQueueArgs,
+  config: formatActionArgs,
+  mcp: formatActionArgs,
+  plugins: (values) => formatActionArgs(values, ["show", "get", "enable", "disable"]),
+  debug: (values) => formatActionArgs(values, []),
+  queue: (values) => formatNamedArgs(values, ["mode", "debounce", "cap", "drop"], ":", "mode"),
+  exec: (values) => formatNamedArgs(values, ["host", "security", "ask", "node"], "="),
 };

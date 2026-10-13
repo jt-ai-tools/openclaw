@@ -1,5 +1,13 @@
-# signal 目錄索引
+# Signal OpenClaw channel
 
-### 子目錄
+Official OpenClaw channel plugin for Signal.
 
-- [src](src/README.md)
+## Install
+
+```sh
+openclaw plugins install @openclaw/signal
+```
+
+## Docs
+
+See `docs/channels/signal.md` in the OpenClaw repository, or the published docs at `https://docs.openclaw.ai/channels/signal`.

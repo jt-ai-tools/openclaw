@@ -1,78 +1,54 @@
-import type { AgentElevatedAllowFromConfig, OpenClawConfig } from "../../config/config.js";
-import type { MsgContext } from "../templating.js";
+import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import { normalizeStringEntries } from "@openclaw/normalization-core/string-normalization";
 import { resolveAgentConfig } from "../../agents/agent-scope.js";
-import { getChannelDock } from "../../channels/dock.js";
-import { normalizeChannelId } from "../../channels/plugins/index.js";
-import { CHAT_CHANNEL_ORDER } from "../../channels/registry.js";
-import { formatCliCommand } from "../../cli/command-format.js";
-import { INTERNAL_MESSAGE_CHANNEL } from "../../utils/message-channel.js";
+import { getChannelPlugin, normalizeChannelId } from "../../channels/plugins/index.js";
+import type { AgentElevatedAllowFromConfig, OpenClawConfig } from "../../config/config.js";
+import { shouldUseFromAsSenderFallback } from "../sender-identity.js";
+import type { MsgContext } from "../templating.js";
+import {
+  type AllowFromFormatter,
+  type ExplicitElevatedAllowField,
+  buildFormattedTokens,
+  buildMutableTokens,
+  matchesFormattedTokens,
+  matchesMutableTokens,
+  parseExplicitElevatedAllowEntry,
+} from "./elevated-allowlist-matcher.js";
+export { formatElevatedUnavailableMessage } from "./elevated-unavailable.js";
 
-function normalizeAllowToken(value?: string) {
-  if (!value) {
-    return "";
+function resolveAllowFromFormatter(params: {
+  cfg: OpenClawConfig;
+  provider: string;
+  accountId?: string;
+}): AllowFromFormatter {
+  const normalizedProvider = normalizeChannelId(params.provider);
+  const formatAllowFrom = normalizedProvider
+    ? getChannelPlugin(normalizedProvider)?.config?.formatAllowFrom
+    : undefined;
+  if (!formatAllowFrom) {
+    return normalizeStringEntries;
   }
-  return value.trim().toLowerCase();
-}
-
-function slugAllowToken(value?: string) {
-  if (!value) {
-    return "";
-  }
-  let text = value.trim().toLowerCase();
-  if (!text) {
-    return "";
-  }
-  text = text.replace(/^[@#]+/, "");
-  text = text.replace(/[\s_]+/g, "-");
-  text = text.replace(/[^a-z0-9-]+/g, "-");
-  return text.replace(/-{2,}/g, "-").replace(/^-+|-+$/g, "");
-}
-
-const SENDER_PREFIXES = [
-  ...CHAT_CHANNEL_ORDER,
-  INTERNAL_MESSAGE_CHANNEL,
-  "user",
-  "group",
-  "channel",
-];
-const SENDER_PREFIX_RE = new RegExp(`^(${SENDER_PREFIXES.join("|")}):`, "i");
-
-function stripSenderPrefix(value?: string) {
-  if (!value) {
-    return "";
-  }
-  const trimmed = value.trim();
-  return trimmed.replace(SENDER_PREFIX_RE, "");
-}
-
-function resolveElevatedAllowList(
-  allowFrom: AgentElevatedAllowFromConfig | undefined,
-  provider: string,
-  fallbackAllowFrom?: Array<string | number>,
-): Array<string | number> | undefined {
-  if (!allowFrom) {
-    return fallbackAllowFrom;
-  }
-  const value = allowFrom[provider];
-  return Array.isArray(value) ? value : fallbackAllowFrom;
+  return (values) =>
+    formatAllowFrom({
+      cfg: params.cfg,
+      accountId: params.accountId,
+      allowFrom: values,
+    })
+      .map((entry) => normalizeOptionalString(entry) ?? "")
+      .filter(Boolean);
 }
 
 function isApprovedElevatedSender(params: {
   provider: string;
   ctx: MsgContext;
+  formatAllowFrom: AllowFromFormatter;
   allowFrom?: AgentElevatedAllowFromConfig;
   fallbackAllowFrom?: Array<string | number>;
 }): boolean {
-  const rawAllow = resolveElevatedAllowList(
-    params.allowFrom,
-    params.provider,
-    params.fallbackAllowFrom,
+  const configuredAllow = params.allowFrom?.[params.provider];
+  const allowTokens = normalizeStringEntries(
+    Array.isArray(configuredAllow) ? configuredAllow : params.fallbackAllowFrom,
   );
-  if (!rawAllow || rawAllow.length === 0) {
-    return false;
-  }
-
-  const allowTokens = rawAllow.map((entry) => String(entry).trim()).filter(Boolean);
   if (allowTokens.length === 0) {
     return false;
   }
@@ -80,55 +56,55 @@ function isApprovedElevatedSender(params: {
     return true;
   }
 
-  const tokens = new Set<string>();
-  const addToken = (value?: string) => {
-    if (!value) {
-      return;
-    }
-    const trimmed = value.trim();
-    if (!trimmed) {
-      return;
-    }
-    tokens.add(trimmed);
-    const normalized = normalizeAllowToken(trimmed);
-    if (normalized) {
-      tokens.add(normalized);
-    }
-    const slugged = slugAllowToken(trimmed);
-    if (slugged) {
-      tokens.add(slugged);
-    }
+  const senderId = normalizeOptionalString(params.ctx.SenderId);
+  const senderFrom = normalizeOptionalString(params.ctx.From);
+  const senderE164 = normalizeOptionalString(params.ctx.SenderE164);
+  const identityTokens = (value: string | undefined, includeStripped: boolean) =>
+    value
+      ? buildFormattedTokens({ formatAllowFrom: params.formatAllowFrom, value, includeStripped })
+      : new Set<string>();
+  // Identity fields use channel formatting; mutable labels use normalized text matching.
+  const fieldTokens: Record<ExplicitElevatedAllowField, Set<string>> = {
+    id: identityTokens(senderId, true),
+    from: identityTokens(
+      senderFrom &&
+        shouldUseFromAsSenderFallback({ from: senderFrom, chatType: params.ctx.ChatType })
+        ? senderFrom
+        : undefined,
+      true,
+    ),
+    e164: identityTokens(senderE164, false),
+    name: buildMutableTokens(params.ctx.SenderName),
+    username: buildMutableTokens(params.ctx.SenderUsername),
+    tag: buildMutableTokens(params.ctx.SenderTag),
   };
+  const senderIdentityTokens = new Set([
+    ...fieldTokens.id,
+    ...fieldTokens.from,
+    ...fieldTokens.e164,
+  ]);
 
-  addToken(params.ctx.SenderName);
-  addToken(params.ctx.SenderUsername);
-  addToken(params.ctx.SenderTag);
-  addToken(params.ctx.SenderE164);
-  addToken(params.ctx.From);
-  addToken(stripSenderPrefix(params.ctx.From));
-  addToken(params.ctx.To);
-  addToken(stripSenderPrefix(params.ctx.To));
-
-  for (const rawEntry of allowTokens) {
-    const entry = rawEntry.trim();
-    if (!entry) {
-      continue;
+  return allowTokens.some((entry) => {
+    const explicitEntry = parseExplicitElevatedAllowEntry(entry);
+    if (!explicitEntry) {
+      return matchesFormattedTokens({
+        formatAllowFrom: params.formatAllowFrom,
+        value: entry,
+        includeStripped: true,
+        tokens: senderIdentityTokens,
+      });
     }
-    const stripped = stripSenderPrefix(entry);
-    if (tokens.has(entry) || tokens.has(stripped)) {
-      return true;
-    }
-    const normalized = normalizeAllowToken(stripped);
-    if (normalized && tokens.has(normalized)) {
-      return true;
-    }
-    const slugged = slugAllowToken(stripped);
-    if (slugged && tokens.has(slugged)) {
-      return true;
-    }
-  }
-
-  return false;
+    const { field, value } = explicitEntry;
+    const tokens = fieldTokens[field];
+    return field === "name" || field === "username" || field === "tag"
+      ? matchesMutableTokens(value, tokens)
+      : matchesFormattedTokens({
+          formatAllowFrom: params.formatAllowFrom,
+          value,
+          includeStripped: field !== "e164",
+          tokens,
+        });
+  });
 }
 
 export function resolveElevatedPermissions(params: {
@@ -153,7 +129,7 @@ export function resolveElevatedPermissions(params: {
   if (!agentEnabled) {
     failures.push({
       gate: "enabled",
-      key: "agents.list[].tools.elevated.enabled",
+      key: "agents.entries.*.tools.elevated.enabled",
     });
   }
   if (!enabled) {
@@ -165,20 +141,26 @@ export function resolveElevatedPermissions(params: {
   }
 
   const normalizedProvider = normalizeChannelId(params.provider);
-  const dockFallbackAllowFrom = normalizedProvider
-    ? getChannelDock(normalizedProvider)?.elevated?.allowFromFallback?.({
+  const fallbackAllowFrom = normalizedProvider
+    ? getChannelPlugin(normalizedProvider)?.elevated?.allowFromFallback?.({
         cfg: params.cfg,
         accountId: params.ctx.AccountId,
       })
     : undefined;
-  const fallbackAllowFrom = dockFallbackAllowFrom;
-  const globalAllowed = isApprovedElevatedSender({
+  const formatAllowFrom = resolveAllowFromFormatter({
+    cfg: params.cfg,
     provider: params.provider,
-    ctx: params.ctx,
-    allowFrom: globalConfig?.allowFrom,
-    fallbackAllowFrom,
+    accountId: params.ctx.AccountId,
   });
-  if (!globalAllowed) {
+  const isAllowed = (allowFrom: AgentElevatedAllowFromConfig | undefined) =>
+    isApprovedElevatedSender({
+      provider: params.provider,
+      ctx: params.ctx,
+      formatAllowFrom,
+      allowFrom,
+      fallbackAllowFrom,
+    });
+  if (!isAllowed(globalConfig?.allowFrom)) {
     failures.push({
       gate: "allowFrom",
       key: `tools.elevated.allowFrom.${params.provider}`,
@@ -186,48 +168,12 @@ export function resolveElevatedPermissions(params: {
     return { enabled, allowed: false, failures };
   }
 
-  const agentAllowed = agentConfig?.allowFrom
-    ? isApprovedElevatedSender({
-        provider: params.provider,
-        ctx: params.ctx,
-        allowFrom: agentConfig.allowFrom,
-        fallbackAllowFrom,
-      })
-    : true;
+  const agentAllowed = agentConfig?.allowFrom ? isAllowed(agentConfig.allowFrom) : true;
   if (!agentAllowed) {
     failures.push({
       gate: "allowFrom",
-      key: `agents.list[].tools.elevated.allowFrom.${params.provider}`,
+      key: `agents.entries.*.tools.elevated.allowFrom.${params.provider}`,
     });
   }
-  return { enabled, allowed: globalAllowed && agentAllowed, failures };
-}
-
-export function formatElevatedUnavailableMessage(params: {
-  runtimeSandboxed: boolean;
-  failures: Array<{ gate: string; key: string }>;
-  sessionKey?: string;
-}): string {
-  const lines: string[] = [];
-  lines.push(
-    `elevated is not available right now (runtime=${params.runtimeSandboxed ? "sandboxed" : "direct"}).`,
-  );
-  if (params.failures.length > 0) {
-    lines.push(`Failing gates: ${params.failures.map((f) => `${f.gate} (${f.key})`).join(", ")}`);
-  } else {
-    lines.push(
-      "Failing gates: enabled (tools.elevated.enabled / agents.list[].tools.elevated.enabled), allowFrom (tools.elevated.allowFrom.<provider>).",
-    );
-  }
-  lines.push("Fix-it keys:");
-  lines.push("- tools.elevated.enabled");
-  lines.push("- tools.elevated.allowFrom.<provider>");
-  lines.push("- agents.list[].tools.elevated.enabled");
-  lines.push("- agents.list[].tools.elevated.allowFrom.<provider>");
-  if (params.sessionKey) {
-    lines.push(
-      `See: ${formatCliCommand(`openclaw sandbox explain --session ${params.sessionKey}`)}`,
-    );
-  }
-  return lines.join("\n");
+  return { enabled, allowed: agentAllowed, failures };
 }

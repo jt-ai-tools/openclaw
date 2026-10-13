@@ -1,11 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
+import { tryProcessCwd } from "./safe-cwd.js";
 
 type IsMainModuleOptions = {
   currentFile: string;
   argv?: string[];
   env?: NodeJS.ProcessEnv;
   cwd?: string;
+  wrapperEntryPairs?: Array<{
+    wrapperBasename: string;
+    entryBasename: string;
+  }>;
 };
 
 function normalizePathCandidate(candidate: string | undefined, cwd: string): string | undefined {
@@ -15,20 +20,24 @@ function normalizePathCandidate(candidate: string | undefined, cwd: string): str
 
   const resolved = path.resolve(cwd, candidate);
   try {
+    // Compare real paths so symlinked package bins and resolved entry files still match.
     return fs.realpathSync.native(resolved);
   } catch {
     return resolved;
   }
 }
 
+/** Detects whether a module is executing as the process entrypoint, including wrapper launches. */
 export function isMainModule({
   currentFile,
   argv = process.argv,
   env = process.env,
-  cwd = process.cwd(),
+  cwd,
+  wrapperEntryPairs = [],
 }: IsMainModuleOptions): boolean {
-  const normalizedCurrent = normalizePathCandidate(currentFile, cwd);
-  const normalizedArgv1 = normalizePathCandidate(argv[1], cwd);
+  const resolvedCwd = cwd ?? tryProcessCwd() ?? path.dirname(currentFile);
+  const normalizedCurrent = normalizePathCandidate(currentFile, resolvedCwd);
+  const normalizedArgv1 = normalizePathCandidate(argv[1], resolvedCwd);
 
   if (normalizedCurrent && normalizedArgv1 && normalizedCurrent === normalizedArgv1) {
     return true;
@@ -36,18 +45,19 @@ export function isMainModule({
 
   // PM2 runs the script via an internal wrapper; `argv[1]` points at the wrapper.
   // PM2 exposes the actual script path in `pm_exec_path`.
-  const normalizedPmExecPath = normalizePathCandidate(env.pm_exec_path, cwd);
+  const normalizedPmExecPath = normalizePathCandidate(env.pm_exec_path, resolvedCwd);
   if (normalizedCurrent && normalizedPmExecPath && normalizedCurrent === normalizedPmExecPath) {
     return true;
   }
 
-  // Fallback: basename match (relative paths, symlinked bins).
-  if (
-    normalizedCurrent &&
-    normalizedArgv1 &&
-    path.basename(normalizedCurrent) === path.basename(normalizedArgv1)
-  ) {
-    return true;
+  // Optional wrapper->entry mapping for wrapper launchers that import the real entry.
+  if (normalizedCurrent && normalizedArgv1 && wrapperEntryPairs.length > 0) {
+    const currentBase = path.basename(normalizedCurrent);
+    const argvBase = path.basename(normalizedArgv1);
+    return wrapperEntryPairs.some(
+      ({ wrapperBasename, entryBasename }) =>
+        currentBase === entryBasename && argvBase === wrapperBasename,
+    );
   }
 
   return false;

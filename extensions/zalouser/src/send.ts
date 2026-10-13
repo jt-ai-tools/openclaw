@@ -1,160 +1,135 @@
-import { runZca } from "./zca.js";
+import {
+  createAcceptedChannelDeliveryResult,
+  createChannelPartialDeliveryError,
+} from "openclaw/plugin-sdk/channel-inbound";
+import { chunkTextRanges } from "openclaw/plugin-sdk/text-chunking";
+import { createZalouserSendReceipt } from "./send-receipt.js";
+import { sliceTextStyles } from "./text-styles-ranges.js";
+import { parseZalouserTextStyles } from "./text-styles.js";
+import type { ZaloSendOptions, ZaloSendResult } from "./types.js";
+import { sendZaloReaction, sendZaloTextMessage } from "./zalo-js.js";
 
-export type ZalouserSendOptions = {
-  profile?: string;
-  mediaUrl?: string;
-  caption?: string;
-  isGroup?: boolean;
+type ZalouserSendOptions = ZaloSendOptions & {
+  /** Persist each concrete platform send before the next internal chunk starts. */
+  onDeliveryResult?: (result: ZaloSendResult) => Promise<void> | void;
 };
 
-export type ZalouserSendResult = {
-  ok: boolean;
-  messageId?: string;
-  error?: string;
+const ZALO_TEXT_LIMIT = 2000;
+
+type StyledTextChunk = {
+  text: string;
+  styles?: ZaloSendOptions["textStyles"];
 };
 
 export async function sendMessageZalouser(
   threadId: string,
   text: string,
   options: ZalouserSendOptions = {},
-): Promise<ZalouserSendResult> {
-  const profile = options.profile || process.env.ZCA_PROFILE || "default";
+): Promise<ZaloSendResult> {
+  const { onDeliveryResult, ...transportOptions } = options;
+  const prepared =
+    transportOptions.textMode === "markdown"
+      ? parseZalouserTextStyles(text)
+      : { text, styles: transportOptions.textStyles };
+  const textChunkLimit = transportOptions.textChunkLimit ?? ZALO_TEXT_LIMIT;
+  const chunks = splitStyledText(
+    prepared.text,
+    (prepared.styles?.length ?? 0) > 0 ? prepared.styles : undefined,
+    textChunkLimit,
+    transportOptions.textChunkMode,
+  );
 
-  if (!threadId?.trim()) {
-    return { ok: false, error: "No threadId provided" };
-  }
-
-  // Handle media sending
-  if (options.mediaUrl) {
-    return sendMediaZalouser(threadId, options.mediaUrl, {
-      ...options,
-      caption: text || options.caption,
-    });
-  }
-
-  // Send text message
-  const args = ["msg", "send", threadId.trim(), text.slice(0, 2000)];
-  if (options.isGroup) {
-    args.push("-g");
-  }
-
+  let lastResult: ZaloSendResult | null = null;
+  const accepted: ZaloSendResult[] = [];
   try {
-    const result = await runZca(args, { profile });
-
-    if (result.ok) {
-      return { ok: true, messageId: extractMessageId(result.stdout) };
+    for (const [index, chunk] of chunks.entries()) {
+      const chunkOptions =
+        index === 0
+          ? { ...transportOptions, textStyles: chunk.styles }
+          : {
+              ...transportOptions,
+              caption: undefined,
+              mediaLocalRoots: undefined,
+              mediaUrl: undefined,
+              textStyles: chunk.styles,
+            };
+      const chunkStart = accepted.length;
+      const result = await sendZaloTextMessage(
+        threadId,
+        chunk.text,
+        chunkOptions,
+        async (progress) => {
+          accepted.push(progress);
+          await onDeliveryResult?.(progress);
+        },
+      );
+      if (result.ok || result.receipt.platformMessageIds.length > 0) {
+        // The final chunk receipt includes any nested audio progress already reported.
+        accepted.splice(chunkStart, accepted.length - chunkStart, result);
+      }
+      if (!result.ok) {
+        throw new Error(result.error || "Failed to send Zalouser message");
+      }
+      await onDeliveryResult?.(result);
+      lastResult = result;
     }
-
-    return { ok: false, error: result.stderr || "Failed to send message" };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
-}
-
-async function sendMediaZalouser(
-  threadId: string,
-  mediaUrl: string,
-  options: ZalouserSendOptions = {},
-): Promise<ZalouserSendResult> {
-  const profile = options.profile || process.env.ZCA_PROFILE || "default";
-
-  if (!threadId?.trim()) {
-    return { ok: false, error: "No threadId provided" };
-  }
-
-  if (!mediaUrl?.trim()) {
-    return { ok: false, error: "No media URL provided" };
-  }
-
-  // Determine media type from URL
-  const lowerUrl = mediaUrl.toLowerCase();
-  let command: string;
-  if (lowerUrl.match(/\.(mp4|mov|avi|webm)$/)) {
-    command = "video";
-  } else if (lowerUrl.match(/\.(mp3|wav|ogg|m4a)$/)) {
-    command = "voice";
-  } else {
-    command = "image";
-  }
-
-  const args = ["msg", command, threadId.trim(), "-u", mediaUrl.trim()];
-  if (options.caption) {
-    args.push("-m", options.caption.slice(0, 2000));
-  }
-  if (options.isGroup) {
-    args.push("-g");
-  }
-
-  try {
-    const result = await runZca(args, { profile });
-
-    if (result.ok) {
-      return { ok: true, messageId: extractMessageId(result.stdout) };
+  } catch (error) {
+    if (accepted.length > 0) {
+      throw createChannelPartialDeliveryError(
+        error,
+        createAcceptedChannelDeliveryResult({ results: accepted }),
+      );
     }
-
-    return { ok: false, error: result.stderr || `Failed to send ${command}` };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    throw error;
   }
+
+  return (
+    lastResult ?? {
+      ok: false,
+      error: "No message content provided",
+      receipt: createZalouserSendReceipt({ threadId, kind: "text" }),
+    }
+  );
 }
 
 export async function sendImageZalouser(
   threadId: string,
   imageUrl: string,
   options: ZalouserSendOptions = {},
-): Promise<ZalouserSendResult> {
-  const profile = options.profile || process.env.ZCA_PROFILE || "default";
-  const args = ["msg", "image", threadId.trim(), "-u", imageUrl.trim()];
-  if (options.caption) {
-    args.push("-m", options.caption.slice(0, 2000));
-  }
-  if (options.isGroup) {
-    args.push("-g");
-  }
-
-  try {
-    const result = await runZca(args, { profile });
-    if (result.ok) {
-      return { ok: true, messageId: extractMessageId(result.stdout) };
-    }
-    return { ok: false, error: result.stderr || "Failed to send image" };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
+): Promise<ZaloSendResult> {
+  return await sendMessageZalouser(threadId, options.caption ?? "", {
+    ...options,
+    caption: undefined,
+    mediaUrl: imageUrl,
+  });
 }
 
-export async function sendLinkZalouser(
-  threadId: string,
-  url: string,
-  options: ZalouserSendOptions = {},
-): Promise<ZalouserSendResult> {
-  const profile = options.profile || process.env.ZCA_PROFILE || "default";
-  const args = ["msg", "link", threadId.trim(), url.trim()];
-  if (options.isGroup) {
-    args.push("-g");
-  }
-
-  try {
-    const result = await runZca(args, { profile });
-    if (result.ok) {
-      return { ok: true, messageId: extractMessageId(result.stdout) };
-    }
-    return { ok: false, error: result.stderr || "Failed to send link" };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
+export async function sendReactionZalouser(
+  params: Parameters<typeof sendZaloReaction>[0],
+): Promise<ZaloSendResult> {
+  const result = await sendZaloReaction(params);
+  return {
+    ok: result.ok,
+    error: result.error,
+    receipt: createZalouserSendReceipt({ threadId: params.threadId, kind: "unknown" }),
+  };
 }
 
-function extractMessageId(stdout: string): string | undefined {
-  // Try to extract message ID from output
-  const match = stdout.match(/message[_\s]?id[:\s]+(\S+)/i);
-  if (match) {
-    return match[1];
+function splitStyledText(
+  text: string,
+  styles: ZaloSendOptions["textStyles"],
+  limit: number,
+  mode: ZaloSendOptions["textChunkMode"],
+): StyledTextChunk[] {
+  if (text.length === 0) {
+    return [{ text, styles: undefined }];
   }
-  // Return first word if it looks like an ID
-  const firstWord = stdout.trim().split(/\s+/)[0];
-  if (firstWord && /^[a-zA-Z0-9_-]+$/.test(firstWord)) {
-    return firstWord;
-  }
-  return undefined;
+
+  return chunkTextRanges(text, {
+    limit,
+    mode: mode === "newline" ? "preferred" : "hard",
+  }).map(({ start, end }) => ({
+    text: text.slice(start, end),
+    styles: sliceTextStyles(styles, start, end),
+  }));
 }

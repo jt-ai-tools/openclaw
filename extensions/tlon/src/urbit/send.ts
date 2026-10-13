@@ -1,18 +1,51 @@
 import { scot, da } from "@urbit/aura";
+import {
+  createMessageReceiptFromOutboundResults,
+  type MessageReceiptPartKind,
+} from "openclaw/plugin-sdk/channel-outbound";
+import type { UrbitSSEClient } from "./sse-client.js";
+import { markdownToStory, createImageBlock, isImageUrl, type Story } from "./story.js";
 
-export type TlonPokeApi = {
-  poke: (params: { app: string; mark: string; json: unknown }) => Promise<unknown>;
-};
-
-type SendTextParams = {
-  api: TlonPokeApi;
+type SendStoryParams = {
+  api: { poke: (...args: Parameters<UrbitSSEClient["poke"]>) => Promise<unknown> };
   fromShip: string;
   toShip: string;
-  text: string;
+  story: Story;
+  kind?: MessageReceiptPartKind;
 };
 
-export async function sendDm({ api, fromShip, toShip, text }: SendTextParams) {
-  const story = [{ inline: [text] }];
+function createTlonSendReceipt(params: {
+  messageId: string;
+  conversationId: string;
+  kind: MessageReceiptPartKind;
+}) {
+  return createMessageReceiptFromOutboundResults({
+    results: [
+      {
+        channel: "tlon",
+        messageId: params.messageId,
+        conversationId: params.conversationId,
+      },
+    ],
+    threadId: params.conversationId,
+    kind: params.kind,
+  });
+}
+
+export async function sendDm({
+  text,
+  ...params
+}: Omit<SendStoryParams, "story" | "kind"> & { text: string }) {
+  return sendDmWithStory({ ...params, story: markdownToStory(text), kind: "text" });
+}
+
+export async function sendDmWithStory({
+  api,
+  fromShip,
+  toShip,
+  story,
+  kind = "unknown",
+}: SendStoryParams) {
   const sentAt = Date.now();
   const idUd = scot("ud", da.fromUnix(sentAt));
   const id = `${fromShip}/${idUd}`;
@@ -40,27 +73,35 @@ export async function sendDm({ api, fromShip, toShip, text }: SendTextParams) {
     json: action,
   });
 
-  return { channel: "tlon", messageId: id };
+  return {
+    channel: "tlon",
+    messageId: id,
+    receipt: createTlonSendReceipt({ messageId: id, conversationId: toShip, kind }),
+  };
 }
 
-type SendGroupParams = {
-  api: TlonPokeApi;
-  fromShip: string;
+type SendGroupStoryParams = Omit<SendStoryParams, "toShip"> & {
   hostShip: string;
   channelName: string;
-  text: string;
   replyToId?: string | null;
 };
 
 export async function sendGroupMessage({
+  text,
+  ...params
+}: Omit<SendGroupStoryParams, "story" | "kind"> & { text: string }) {
+  return sendGroupMessageWithStory({ ...params, story: markdownToStory(text), kind: "text" });
+}
+
+export async function sendGroupMessageWithStory({
   api,
   fromShip,
   hostShip,
   channelName,
-  text,
+  story,
   replyToId,
-}: SendGroupParams) {
-  const story = [{ inline: [text] }];
+  kind = "unknown",
+}: SendGroupStoryParams) {
   const sentAt = Date.now();
 
   // Format reply ID as @ud (with dots) - required for Tlon to recognize thread replies
@@ -73,39 +114,15 @@ export async function sendGroupMessage({
     }
   }
 
+  const memo = { content: story, author: fromShip, sent: sentAt };
   const action = {
     channel: {
       nest: `chat/${hostShip}/${channelName}`,
-      action: formattedReplyId
-        ? {
-            // Thread reply - needs post wrapper around reply action
-            // ReplyActionAdd takes Memo: {content, author, sent} - no kind/blob/meta
-            post: {
-              reply: {
-                id: formattedReplyId,
-                action: {
-                  add: {
-                    content: story,
-                    author: fromShip,
-                    sent: sentAt,
-                  },
-                },
-              },
-            },
-          }
-        : {
-            // Regular post
-            post: {
-              add: {
-                content: story,
-                author: fromShip,
-                sent: sentAt,
-                kind: "/chat",
-                blob: null,
-                meta: null,
-              },
-            },
-          },
+      action: {
+        post: formattedReplyId
+          ? { reply: { id: formattedReplyId, action: { add: memo } } }
+          : { add: { ...memo, kind: "/chat", blob: null, meta: null } },
+      },
     },
   };
 
@@ -115,17 +132,32 @@ export async function sendGroupMessage({
     json: action,
   });
 
-  return { channel: "tlon", messageId: `${fromShip}/${sentAt}` };
+  const messageId = `${fromShip}/${sentAt}`;
+  return {
+    channel: "tlon",
+    messageId,
+    receipt: createTlonSendReceipt({
+      messageId,
+      conversationId: `${hostShip}/${channelName}`,
+      kind,
+    }),
+  };
 }
 
-export function buildMediaText(text: string | undefined, mediaUrl: string | undefined): string {
+export function buildMediaStory(text: string | undefined, mediaUrl: string | undefined): Story {
+  const story: Story = [];
   const cleanText = text?.trim() ?? "";
   const cleanUrl = mediaUrl?.trim() ?? "";
-  if (cleanText && cleanUrl) {
-    return `${cleanText}\n${cleanUrl}`;
+
+  if (cleanText) {
+    story.push(...markdownToStory(cleanText));
   }
-  if (cleanUrl) {
-    return cleanUrl;
+
+  if (cleanUrl && isImageUrl(cleanUrl)) {
+    story.push(createImageBlock(cleanUrl, ""));
+  } else if (cleanUrl) {
+    story.push({ inline: [{ link: { href: cleanUrl, content: cleanUrl } }] });
   }
-  return cleanText;
+
+  return story.length > 0 ? story : [{ inline: [""] }];
 }

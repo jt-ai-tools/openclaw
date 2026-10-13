@@ -1,97 +1,113 @@
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { rm } from "node:fs/promises";
+import { isIP } from "node:net";
 import os from "node:os";
-import { approveDevicePairing, listDevicePairing } from "openclaw/plugin-sdk";
+import path from "node:path";
+import { createLazyRuntimeModule } from "openclaw/plugin-sdk/lazy-runtime";
+import {
+  definePluginEntry,
+  type OpenClawPluginApi,
+  type PluginCommandContext,
+} from "openclaw/plugin-sdk/plugin-entry";
+import {
+  normalizeLowercaseStringOrEmpty,
+  normalizeOptionalString,
+} from "openclaw/plugin-sdk/string-coerce-runtime";
 
-const DEFAULT_GATEWAY_PORT = 18789;
+const loadDevicePairApiModule = createLazyRuntimeModule(() => import("./api.js"));
+
+const loadNotifyModule = createLazyRuntimeModule(() => import("./notify.js"));
+
+const loadPairCommandApproveModule = createLazyRuntimeModule(
+  () => import("./pair-command-approve.js"),
+);
+
+const loadPairCommandAuthModule = createLazyRuntimeModule(() => import("./pair-command-auth.js"));
+
+function formatDurationMinutes(expiresAtMs: number): string {
+  const msRemaining = Math.max(0, expiresAtMs - Date.now());
+  const minutes = Math.max(1, Math.ceil(msRemaining / 60_000));
+  return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+}
 
 type DevicePairPluginConfig = {
   publicUrl?: string;
 };
 
-type SetupPayload = {
-  url: string;
-  token?: string;
-  password?: string;
-};
+type SetupPayload = Awaited<ReturnType<typeof issueSetupPayload>>;
 
-type ResolveUrlResult = {
-  url?: string;
-  source?: string;
-  error?: string;
-};
+type QrCommandContext = Pick<
+  PluginCommandContext,
+  "channel" | "senderId" | "from" | "to" | "accountId" | "messageThreadId"
+>;
 
-type ResolveAuthResult = {
-  token?: string;
-  password?: string;
-  label?: string;
-  error?: string;
-};
+const QR_SUPPORTED_CHANNELS = new Set([
+  "telegram",
+  "discord",
+  "slack",
+  "signal",
+  "imessage",
+  "whatsapp",
+]);
 
-function normalizeUrl(raw: string, schemeFallback: "ws" | "wss"): string | null {
-  const trimmed = raw.trim();
-  if (!trimmed) {
-    return null;
-  }
-  try {
-    const parsed = new URL(trimmed);
-    const scheme = parsed.protocol.replace(":", "");
-    if (!scheme) {
-      return null;
-    }
-    const resolvedScheme = scheme === "http" ? "ws" : scheme === "https" ? "wss" : scheme;
-    if (resolvedScheme !== "ws" && resolvedScheme !== "wss") {
-      return null;
-    }
-    const host = parsed.hostname;
-    if (!host) {
-      return null;
-    }
-    const port = parsed.port ? `:${parsed.port}` : "";
-    return `${resolvedScheme}://${host}${port}`;
-  } catch {
-    // Fall through to host:port parsing.
-  }
-
-  const withoutPath = trimmed.split("/")[0] ?? "";
-  if (!withoutPath) {
-    return null;
-  }
-  return `${schemeFallback}://${withoutPath}`;
+function describeSecureMobilePairingFix(source?: string): string {
+  const sourceNote = source ? ` Resolved source: ${source}.` : "";
+  return (
+    "Tailscale and public mobile pairing require a secure gateway URL (wss://) or Tailscale Serve/Funnel." +
+    sourceNote +
+    " Fix: use a private LAN address, prefer gateway.tailscale.mode=serve, or set " +
+    "gateway.remote.url / plugins.entries.device-pair.config.publicUrl to a wss:// URL. " +
+    "ws:// setup codes are only valid for localhost/loopback, private LAN addresses, .local hosts, or the Android emulator."
+  );
 }
 
-function resolveGatewayPort(cfg: OpenClawPluginApi["config"]): number {
-  const envRaw =
-    process.env.OPENCLAW_GATEWAY_PORT?.trim() || process.env.CLAWDBOT_GATEWAY_PORT?.trim();
-  if (envRaw) {
-    const parsed = Number.parseInt(envRaw, 10);
-    if (Number.isFinite(parsed) && parsed > 0) {
-      return parsed;
-    }
+function normalizeHostForIpCheck(host: string): string {
+  let normalized = normalizeLowercaseStringOrEmpty(host);
+  if (normalized.startsWith("[") && normalized.endsWith("]")) {
+    normalized = normalized.slice(1, -1);
   }
-  const configPort = cfg.gateway?.port;
-  if (typeof configPort === "number" && Number.isFinite(configPort) && configPort > 0) {
-    return configPort;
+  if (normalized.endsWith(".")) {
+    normalized = normalized.slice(0, -1);
   }
-  return DEFAULT_GATEWAY_PORT;
+  const zoneIndex = normalized.indexOf("%");
+  if (zoneIndex >= 0) {
+    normalized = normalized.slice(0, zoneIndex);
+  }
+  return normalized;
 }
 
-function resolveScheme(
-  cfg: OpenClawPluginApi["config"],
-  opts?: { forceSecure?: boolean },
-): "ws" | "wss" {
-  if (opts?.forceSecure) {
-    return "wss";
-  }
-  return cfg.gateway?.tls?.enabled === true ? "wss" : "ws";
-}
-
-function isPrivateIPv4(address: string): boolean {
-  const parts = address.split(".");
-  if (parts.length != 4) {
+function isLoopbackHost(host: string): boolean {
+  const normalized = normalizeHostForIpCheck(host);
+  if (!normalized) {
     return false;
+  }
+  if (normalized === "localhost") {
+    return true;
+  }
+  const octets = parseIPv4Octets(normalized);
+  if (octets) {
+    return octets[0] === 127;
+  }
+  return normalized === "::1" || normalized === "0:0:0:0:0:0:0:1";
+}
+
+function parseIPv4Octets(address: string): [number, number, number, number] | null {
+  const parts = address.split(".");
+  if (parts.length !== 4) {
+    return null;
+  }
+  if (parts.some((part) => !/^\d+$/.test(part))) {
+    return null;
   }
   const octets = parts.map((part) => Number.parseInt(part, 10));
   if (octets.some((value) => !Number.isFinite(value) || value < 0 || value > 255)) {
+    return null;
+  }
+  return octets as [number, number, number, number];
+}
+
+function isPrivateIPv4(address: string): boolean {
+  const octets = parseIPv4Octets(address);
+  if (!octets) {
     return false;
   }
   const [a, b] = octets;
@@ -107,217 +123,124 @@ function isPrivateIPv4(address: string): boolean {
   return false;
 }
 
-function isTailnetIPv4(address: string): boolean {
-  const parts = address.split(".");
-  if (parts.length !== 4) {
+function isPrivateLanIPv6(address: string): boolean {
+  if (isIP(address) !== 6) {
     return false;
   }
-  const octets = parts.map((part) => Number.parseInt(part, 10));
-  if (octets.some((value) => !Number.isFinite(value) || value < 0 || value > 255)) {
+  const firstHextet = address.split(":", 1)[0] ?? "";
+  if (!/^[0-9a-f]{4}$/.test(firstHextet)) {
     return false;
   }
-  const [a, b] = octets;
-  return a === 100 && b >= 64 && b <= 127;
+  const value = Number.parseInt(firstHextet, 16);
+  return (value & 0xfe00) === 0xfc00 || (value & 0xffc0) === 0xfe80;
 }
 
-function pickLanIPv4(): string | null {
-  const nets = os.networkInterfaces();
-  for (const entries of Object.values(nets)) {
-    if (!entries) {
-      continue;
-    }
-    for (const entry of entries) {
-      const family = entry?.family;
-      // Check for IPv4 (string "IPv4" on Node 18+, number 4 on older)
-      const isIpv4 = family === "IPv4" || String(family) === "4";
-      if (!entry || entry.internal || !isIpv4) {
-        continue;
-      }
-      const address = entry.address?.trim() ?? "";
-      if (!address) {
-        continue;
-      }
-      if (isPrivateIPv4(address)) {
-        return address;
-      }
-    }
+function isPrivateLanCleartextHost(host: string): boolean {
+  const normalized = normalizeHostForIpCheck(host);
+  if (normalized.endsWith(".local")) {
+    return true;
   }
-  return null;
+  if (isPrivateIPv4(normalized) || isPrivateLanIPv6(normalized)) {
+    return true;
+  }
+  const octets = parseIPv4Octets(normalized);
+  if (!octets) {
+    return false;
+  }
+  return octets[0] === 169 && octets[1] === 254;
 }
 
-function pickTailnetIPv4(): string | null {
-  const nets = os.networkInterfaces();
-  for (const entries of Object.values(nets)) {
-    if (!entries) {
-      continue;
-    }
-    for (const entry of entries) {
-      const family = entry?.family;
-      // Check for IPv4 (string "IPv4" on Node 18+, number 4 on older)
-      const isIpv4 = family === "IPv4" || String(family) === "4";
-      if (!entry || entry.internal || !isIpv4) {
-        continue;
-      }
-      const address = entry.address?.trim() ?? "";
-      if (!address) {
-        continue;
-      }
-      if (isTailnetIPv4(address)) {
-        return address;
-      }
-    }
-  }
-  return null;
+function isMobilePairingCleartextAllowedHost(host: string): boolean {
+  const normalized = normalizeHostForIpCheck(host);
+  return (
+    isLoopbackHost(normalized) || normalized === "10.0.2.2" || isPrivateLanCleartextHost(normalized)
+  );
 }
 
-async function resolveTailnetHost(api: OpenClawPluginApi): Promise<string | null> {
-  const candidates = ["tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"];
-  for (const candidate of candidates) {
-    try {
-      const result = await api.runtime.system.runCommandWithTimeout(
-        [candidate, "status", "--json"],
-        {
-          timeoutMs: 5000,
-        },
-      );
-      if (result.code !== 0) {
-        continue;
-      }
-      const raw = result.stdout.trim();
-      if (!raw) {
-        continue;
-      }
-      const parsed = parsePossiblyNoisyJsonObject(raw);
-      const self =
-        typeof parsed.Self === "object" && parsed.Self !== null
-          ? (parsed.Self as Record<string, unknown>)
-          : undefined;
-      const dns = typeof self?.DNSName === "string" ? self.DNSName : undefined;
-      if (dns && dns.length > 0) {
-        return dns.replace(/\.$/, "");
-      }
-      const ips = Array.isArray(self?.TailscaleIPs) ? (self?.TailscaleIPs as string[]) : [];
-      if (ips.length > 0) {
-        return ips[0] ?? null;
-      }
-    } catch {
-      continue;
-    }
+function validateMobilePairingUrl(url: string, source?: string): string | null {
+  const parsed = URL.parse(url);
+  if (!parsed) {
+    return "Resolved mobile pairing URL is invalid.";
   }
-  return null;
+  const protocol =
+    parsed.protocol === "https:" ? "wss:" : parsed.protocol === "http:" ? "ws:" : parsed.protocol;
+  if (protocol === "wss:") {
+    return null;
+  }
+  if (protocol !== "ws:" || isMobilePairingCleartextAllowedHost(parsed.hostname)) {
+    return null;
+  }
+  return describeSecureMobilePairingFix(source);
 }
 
-function parsePossiblyNoisyJsonObject(raw: string): Record<string, unknown> {
-  const start = raw.indexOf("{");
-  const end = raw.lastIndexOf("}");
-  if (start === -1 || end <= start) {
-    return {};
-  }
-  try {
-    return JSON.parse(raw.slice(start, end + 1)) as Record<string, unknown>;
-  } catch {
-    return {};
-  }
+function isFullAccessMobilePairingUrl(url: string): boolean {
+  const parsed = URL.parse(url);
+  return (
+    parsed?.protocol === "wss:" || (parsed?.protocol === "ws:" && isLoopbackHost(parsed.hostname))
+  );
 }
 
-function resolveAuth(cfg: OpenClawPluginApi["config"]): ResolveAuthResult {
-  const mode = cfg.gateway?.auth?.mode;
-  const token =
-    process.env.OPENCLAW_GATEWAY_TOKEN?.trim() ||
-    process.env.CLAWDBOT_GATEWAY_TOKEN?.trim() ||
-    cfg.gateway?.auth?.token?.trim();
-  const password =
-    process.env.OPENCLAW_GATEWAY_PASSWORD?.trim() ||
-    process.env.CLAWDBOT_GATEWAY_PASSWORD?.trim() ||
-    cfg.gateway?.auth?.password?.trim();
-
-  if (mode === "password") {
-    if (!password) {
-      return { error: "Gateway auth is set to password, but no password is configured." };
-    }
-    return { password, label: "password" };
-  }
-  if (mode === "token") {
-    if (!token) {
-      return { error: "Gateway auth is set to token, but no token is configured." };
-    }
-    return { token, label: "token" };
-  }
-  if (token) {
-    return { token, label: "token" };
-  }
-  if (password) {
-    return { password, label: "password" };
-  }
-  return { error: "Gateway auth is not configured (no token or password)." };
-}
-
-async function resolveGatewayUrl(api: OpenClawPluginApi): Promise<ResolveUrlResult> {
-  const cfg = api.config;
+async function resolveMobilePairingGatewayUrl(api: OpenClawPluginApi) {
+  const { resolvePairingGatewayUrl, runPluginCommandWithTimeout } = await loadDevicePairApiModule();
   const pluginCfg = (api.pluginConfig ?? {}) as DevicePairPluginConfig;
-  const scheme = resolveScheme(cfg);
-  const port = resolveGatewayPort(cfg);
-
-  if (typeof pluginCfg.publicUrl === "string" && pluginCfg.publicUrl.trim()) {
-    const url = normalizeUrl(pluginCfg.publicUrl, scheme);
-    if (url) {
-      return { url, source: "plugins.entries.device-pair.config.publicUrl" };
-    }
-    return { error: "Configured publicUrl is invalid." };
+  const result = await resolvePairingGatewayUrl(api.config, {
+    env: process.env,
+    publicUrl: pluginCfg.publicUrl,
+    urlPathMode: "origin-only",
+    networkInterfaces: os.networkInterfaces,
+    runCommandWithTimeout: (argv, opts) =>
+      runPluginCommandWithTimeout({ argv, timeoutMs: opts.timeoutMs }),
+  });
+  if (!result.url) {
+    return result;
   }
-
-  const tailscaleMode = cfg.gateway?.tailscale?.mode ?? "off";
-  if (tailscaleMode === "serve" || tailscaleMode === "funnel") {
-    const host = await resolveTailnetHost(api);
-    if (!host) {
-      return { error: "Tailscale Serve is enabled, but MagicDNS could not be resolved." };
-    }
-    return { url: `wss://${host}`, source: `gateway.tailscale.mode=${tailscaleMode}` };
+  const mobilePairingUrlError = validateMobilePairingUrl(result.url, result.source);
+  if (mobilePairingUrlError) {
+    return { error: mobilePairingUrlError };
   }
-
-  const remoteUrl = cfg.gateway?.remote?.url;
-  if (typeof remoteUrl === "string" && remoteUrl.trim()) {
-    const url = normalizeUrl(remoteUrl, scheme);
-    if (url) {
-      return { url, source: "gateway.remote.url" };
-    }
-  }
-
-  const bind = cfg.gateway?.bind ?? "loopback";
-  if (bind === "custom") {
-    const host = cfg.gateway?.customBindHost?.trim();
-    if (host) {
-      return { url: `${scheme}://${host}:${port}`, source: "gateway.bind=custom" };
-    }
-    return { error: "gateway.bind=custom requires gateway.customBindHost." };
-  }
-
-  if (bind === "tailnet") {
-    const host = pickTailnetIPv4();
-    if (host) {
-      return { url: `${scheme}://${host}:${port}`, source: "gateway.bind=tailnet" };
-    }
-    return { error: "gateway.bind=tailnet set, but no tailnet IP was found." };
-  }
-
-  if (bind === "lan") {
-    const host = pickLanIPv4();
-    if (host) {
-      return { url: `${scheme}://${host}:${port}`, source: "gateway.bind=lan" };
-    }
-    return { error: "gateway.bind=lan set, but no private LAN IP was found." };
-  }
-
-  return {
-    error:
-      "Gateway is only bound to loopback. Set gateway.bind=lan, enable tailscale serve, or configure plugins.entries.device-pair.config.publicUrl.",
-  };
+  return result;
 }
 
 function encodeSetupCode(payload: SetupPayload): string {
-  const json = JSON.stringify(payload);
-  const base64 = Buffer.from(json, "utf8").toString("base64");
-  return base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  return Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+}
+
+function buildPairingFlowLines(stepTwo: string): string[] {
+  return [
+    "1) Open the iOS app → Settings → Gateway",
+    `2) ${stepTwo}`,
+    "3) Back here, run /pair approve",
+    "4) If this code leaks or you are done, run /pair cleanup",
+  ];
+}
+
+function buildSecurityNoticeLines(params: {
+  kind: "setup code" | "QR code";
+  expiresAtMs: number;
+  markdown?: boolean;
+}): string[] {
+  const cleanupCommand = params.markdown ? "`/pair cleanup`" : "/pair cleanup";
+  const securityPrefix = params.markdown ? "- " : "";
+  const importantLine = params.markdown
+    ? `**Important:** Run ${cleanupCommand} after pairing finishes.`
+    : `IMPORTANT: After pairing finishes, run ${cleanupCommand}.`;
+  return [
+    `${securityPrefix}Security: single-use bootstrap token`,
+    `${securityPrefix}Expires: ${formatDurationMinutes(params.expiresAtMs)}`,
+    "",
+    importantLine,
+    `If this ${params.kind} leaks, run ${cleanupCommand} immediately.`,
+  ];
+}
+
+function buildQrFollowUpLines(autoNotifyArmed: boolean): string[] {
+  return autoNotifyArmed
+    ? [
+        "After scanning, wait here for the pairing request ping.",
+        "I’ll auto-ping here when the pairing request arrives, then auto-disable.",
+        "If the ping does not arrive, run `/pair approve latest` manually.",
+      ]
+    : ["After scanning, run `/pair approve` to complete pairing."];
 }
 
 function formatSetupReply(payload: SetupPayload, authLabel: string): string {
@@ -325,175 +248,445 @@ function formatSetupReply(payload: SetupPayload, authLabel: string): string {
   return [
     "Pairing setup code generated.",
     "",
-    "1) Open the iOS app → Settings → Gateway",
-    "2) Paste the setup code below and tap Connect",
-    "3) Back here, run /pair approve",
+    ...buildPairingFlowLines("Paste the setup code below and tap Connect"),
     "",
     "Setup code:",
     setupCode,
     "",
     `Gateway: ${payload.url}`,
     `Auth: ${authLabel}`,
+    ...buildAccessLines(payload),
+    ...buildSecurityNoticeLines({
+      kind: "setup code",
+      expiresAtMs: payload.expiresAtMs,
+    }),
   ].join("\n");
 }
 
-function formatSetupInstructions(): string {
+function formatSetupInstructions(expiresAtMs: number): string {
   return [
     "Pairing setup code generated.",
     "",
-    "1) Open the iOS app → Settings → Gateway",
-    "2) Paste the setup code from my next message and tap Connect",
-    "3) Back here, run /pair approve",
+    ...buildPairingFlowLines("Paste the setup code from my next message and tap Connect"),
+    "",
+    ...buildSecurityNoticeLines({
+      kind: "setup code",
+      expiresAtMs,
+    }),
   ].join("\n");
 }
 
-type PendingPairingRequest = {
-  requestId: string;
-  deviceId: string;
-  displayName?: string;
-  platform?: string;
-  remoteIp?: string;
-  ts?: number;
-};
-
-function formatPendingRequests(pending: PendingPairingRequest[]): string {
-  if (pending.length === 0) {
-    return "No pending device pairing requests.";
-  }
-  const lines: string[] = ["Pending device pairing requests:"];
-  for (const req of pending) {
-    const label = req.displayName?.trim() || req.deviceId;
-    const platform = req.platform?.trim();
-    const ip = req.remoteIp?.trim();
-    const parts = [
-      `- ${req.requestId}`,
-      label ? `name=${label}` : null,
-      platform ? `platform=${platform}` : null,
-      ip ? `ip=${ip}` : null,
-    ].filter(Boolean);
-    lines.push(parts.join(" · "));
-  }
-  return lines.join("\n");
+function buildQrInfoLines(params: {
+  payload: SetupPayload;
+  authLabel: string;
+  autoNotifyArmed: boolean;
+  markdown?: boolean;
+}): string[] {
+  const prefix = params.markdown ? "- " : "";
+  return [
+    `${prefix}Gateway: ${params.payload.url}`,
+    `${prefix}Auth: ${params.authLabel}`,
+    ...buildAccessLines(params.payload, params.markdown),
+    ...buildSecurityNoticeLines({
+      kind: "QR code",
+      expiresAtMs: params.payload.expiresAtMs,
+      markdown: params.markdown,
+    }),
+    "",
+    ...buildQrFollowUpLines(params.autoNotifyArmed),
+    "",
+    "If your camera still won’t lock on, run `/pair` for a pasteable setup code.",
+  ];
 }
 
-export default function register(api: OpenClawPluginApi) {
-  api.registerCommand({
-    name: "pair",
-    description: "Generate setup codes and approve device pairing requests.",
-    acceptsArgs: true,
-    handler: async (ctx) => {
-      const args = ctx.args?.trim() ?? "";
-      const tokens = args.split(/\s+/).filter(Boolean);
-      const action = tokens[0]?.toLowerCase() ?? "";
-      api.logger.info?.(
-        `device-pair: /pair invoked channel=${ctx.channel} sender=${ctx.senderId ?? "unknown"} action=${
-          action || "new"
-        }`,
-      );
+function resolveQrReplyTarget(ctx: QrCommandContext): string {
+  if (ctx.channel === "discord") {
+    const senderId = normalizeOptionalString(ctx.senderId) ?? "";
+    if (senderId) {
+      return senderId.startsWith("user:") || senderId.startsWith("channel:")
+        ? senderId
+        : `user:${senderId}`;
+    }
+  }
+  return (
+    normalizeOptionalString(ctx.senderId) ||
+    normalizeOptionalString(ctx.from) ||
+    normalizeOptionalString(ctx.to) ||
+    ""
+  );
+}
 
-      if (action === "status" || action === "pending") {
-        const list = await listDevicePairing();
-        return { text: formatPendingRequests(list.pending) };
-      }
+function buildAccessLines(payload: SetupPayload, markdown = false): string[] {
+  const prefix = markdown ? "- " : "";
+  return [
+    `${prefix}Access: ${payload.access}`,
+    ...(payload.accessDowngraded
+      ? [
+          `${prefix}Plaintext ws:// was limited for safety. Use wss:// or Tailscale Serve, then generate a new code for full access.`,
+        ]
+      : []),
+  ];
+}
 
-      if (action === "approve") {
-        const requested = tokens[1]?.trim();
-        const list = await listDevicePairing();
-        if (list.pending.length === 0) {
-          return { text: "No pending device pairing requests." };
+async function issueSetupPayload(params: {
+  url: string;
+  allowFullAccess: boolean;
+  assertCurrent?: () => void;
+}) {
+  const assertCurrent = params.assertCurrent;
+  const { issueDeviceBootstrapToken, PAIRING_SETUP_BOOTSTRAP_PROFILE } =
+    await loadDevicePairApiModule();
+  const hasPlaintextRoute = !isFullAccessMobilePairingUrl(params.url);
+  // Admin handoff needs both an authorized issuer and TLS (or same-host loopback).
+  const fullAccess = params.allowFullAccess && !hasPlaintextRoute;
+  const accessDowngraded = params.allowFullAccess && hasPlaintextRoute;
+  const issuedBootstrap = await issueDeviceBootstrapToken({
+    ...(assertCurrent ? { assertCurrent } : {}),
+    profile: fullAccess
+      ? {
+          roles: [...PAIRING_SETUP_BOOTSTRAP_PROFILE.roles],
+          scopes: ["operator.admin", ...PAIRING_SETUP_BOOTSTRAP_PROFILE.scopes],
+          purpose: "mobile-full",
+        }
+      : PAIRING_SETUP_BOOTSTRAP_PROFILE,
+  });
+  return {
+    url: params.url,
+    bootstrapToken: issuedBootstrap.token,
+    expiresAtMs: issuedBootstrap.expiresAtMs,
+    access: fullAccess ? ("full" as const) : ("limited" as const),
+    ...(accessDowngraded ? { accessDowngraded: true as const } : {}),
+  };
+}
+
+async function sendQrPngToSupportedChannel(params: {
+  api: OpenClawPluginApi;
+  ctx: QrCommandContext;
+  target: string;
+  caption: string;
+  qrFilePath: string;
+}): Promise<boolean> {
+  const mediaLocalRoots = [path.dirname(params.qrFilePath)];
+  const accountId = normalizeOptionalString(params.ctx.accountId) || undefined;
+  const adapter = await params.api.runtime.channel.outbound.loadAdapter(params.ctx.channel);
+  const send = adapter?.sendMedia;
+  if (!send) {
+    return false;
+  }
+  await send({
+    cfg: params.api.config,
+    to: params.target,
+    text: params.caption,
+    ...(params.ctx.channel === "whatsapp" ? { verbose: false } : {}),
+    mediaUrl: params.qrFilePath,
+    mediaLocalRoots,
+    ...(params.ctx.messageThreadId != null &&
+    (params.ctx.channel === "telegram" || params.ctx.channel === "slack")
+      ? {
+          threadId:
+            params.ctx.channel === "slack"
+              ? String(params.ctx.messageThreadId)
+              : params.ctx.messageThreadId,
+        }
+      : {}),
+    ...(accountId ? { accountId } : {}),
+  });
+  return true;
+}
+
+export default definePluginEntry({
+  id: "device-pair",
+  name: "Device Pair",
+  description: "QR/bootstrap pairing helpers for OpenClaw devices",
+  register(api: OpenClawPluginApi) {
+    api.registerService({
+      id: "device-pair-notifier",
+      apiVersion: 2,
+      start: async ({ scheduler }) => {
+        const { startPairingNotifier } = await loadNotifyModule();
+        startPairingNotifier(api, scheduler);
+      },
+    });
+
+    api.registerCommand({
+      name: "pair",
+      description: "Generate setup codes and approve device pairing requests.",
+      acceptsArgs: true,
+      clientPresentation: {
+        when: "no-arguments",
+        action: { kind: "device-pairing" },
+      },
+      requiredScopes: ["operator.pairing"],
+      handler: async (ctx) => {
+        const assertAdmittedOwner = ctx.assertOwnerCurrent;
+        const args = normalizeOptionalString(ctx.args) ?? "";
+        const tokens = args.split(/\s+/).filter(Boolean);
+        const action = normalizeLowercaseStringOrEmpty(tokens[0]);
+        const gatewayClientScopes = Array.isArray(ctx.gatewayClientScopes)
+          ? ctx.gatewayClientScopes
+          : undefined;
+        const { resolveAuthLabel, resolvePairingCommandAuthState } =
+          await loadPairCommandAuthModule();
+        const authState = resolvePairingCommandAuthState({
+          channel: ctx.channel,
+          gatewayClientScopes,
+          senderIsOwner: ctx.senderIsOwner,
+        });
+        const assertOwnerCurrent = authState.isInternalGatewayCaller
+          ? undefined
+          : assertAdmittedOwner;
+        api.logger.info?.(
+          `device-pair: /pair invoked channel=${ctx.channel} sender=${ctx.senderId ?? "unknown"} action=${
+            action || "new"
+          }`,
+        );
+
+        if (authState.isMissingPairingPrivilege) {
+          return { text: "⚠️ This command requires operator.pairing." };
+        }
+        assertOwnerCurrent?.();
+
+        if (action === "status" || action === "pending") {
+          const [{ listDevicePairing }, { formatPendingRequests }] = await Promise.all([
+            loadDevicePairApiModule(),
+            loadNotifyModule(),
+          ]);
+          const list = await listDevicePairing();
+          assertOwnerCurrent?.();
+          return { text: formatPendingRequests(list.pending) };
         }
 
-        let pending: (typeof list.pending)[number] | undefined;
-        if (requested) {
-          if (requested.toLowerCase() === "latest") {
-            pending = [...list.pending].toSorted((a, b) => (b.ts ?? 0) - (a.ts ?? 0))[0];
-          } else {
-            pending = list.pending.find((entry) => entry.requestId === requested);
+        if (action === "notify") {
+          const notifyAction = normalizeLowercaseStringOrEmpty(tokens[1]) || "status";
+          const { handleNotifyCommand } = await loadNotifyModule();
+          return await handleNotifyCommand({
+            api,
+            ctx: { ...ctx, assertOwnerCurrent },
+            action: notifyAction,
+          });
+        }
+
+        if (action === "approve") {
+          const [
+            { listDevicePairing },
+            { approvePendingPairingRequest, selectPendingApprovalRequest },
+          ] = await Promise.all([loadDevicePairApiModule(), loadPairCommandApproveModule()]);
+          const list = await listDevicePairing();
+          const selected = selectPendingApprovalRequest({
+            pending: list.pending,
+            requested: normalizeOptionalString(tokens[1]),
+          });
+          if (selected.reply) {
+            return selected.reply;
           }
-        } else if (list.pending.length === 1) {
-          pending = list.pending[0];
-        } else {
+          const pending = selected.pending;
+          if (!pending) {
+            return { text: "Pairing request not found." };
+          }
+          return await approvePendingPairingRequest({
+            requestId: pending.requestId,
+            callerScopes: authState.approvalCallerScopes,
+            assertCurrent: assertOwnerCurrent,
+          });
+        }
+
+        if (action === "cleanup" || action === "clear" || action === "revoke") {
+          const { clearDeviceBootstrapTokens } = await loadDevicePairApiModule();
+          const cleared = await clearDeviceBootstrapTokens({ assertCurrent: assertOwnerCurrent });
           return {
             text:
-              `${formatPendingRequests(list.pending)}\n\n` +
-              "Multiple pending requests found. Approve one explicitly:\n" +
-              "/pair approve <requestId>\n" +
-              "Or approve the most recent:\n" +
-              "/pair approve latest",
+              cleared.removed > 0
+                ? `Invalidated ${cleared.removed} unused setup code${cleared.removed === 1 ? "" : "s"}.`
+                : "No unused setup codes were active.",
           };
         }
-        if (!pending) {
-          return { text: "Pairing request not found." };
+
+        if (authState.isMissingSetupHandoffPrivilege) {
+          return {
+            text: "⚠️ Setup code handoff includes Talk secrets and requires operator.talk.secrets.",
+          };
         }
-        const approved = await approveDevicePairing(pending.requestId);
-        if (!approved) {
-          return { text: "Pairing request not found." };
+
+        const authLabelResult = resolveAuthLabel(api.config);
+        if (authLabelResult.error) {
+          return { text: `Error: ${authLabelResult.error}` };
         }
-        const label = approved.device.displayName?.trim() || approved.device.deviceId;
-        const platform = approved.device.platform?.trim();
-        const platformLabel = platform ? ` (${platform})` : "";
-        return { text: `✅ Paired ${label}${platformLabel}.` };
-      }
+        const urlResult = await resolveMobilePairingGatewayUrl(api);
+        if (!urlResult.url) {
+          return { text: `Error: ${urlResult.error ?? "Gateway URL unavailable."}` };
+        }
+        const authLabel = authLabelResult.label ?? "auth";
+        const setupRequest = {
+          url: urlResult.url,
+          allowFullAccess: authState.canIssueFullAccessSetup,
+          assertCurrent: assertOwnerCurrent,
+        };
 
-      const auth = resolveAuth(api.config);
-      if (auth.error) {
-        return { text: `Error: ${auth.error}` };
-      }
+        if (action === "qr") {
+          const channel = ctx.channel;
+          const target = resolveQrReplyTarget(ctx);
+          let autoNotifyArmed = false;
 
-      const urlResult = await resolveGatewayUrl(api);
-      if (!urlResult.url) {
-        return { text: `Error: ${urlResult.error ?? "Gateway URL unavailable."}` };
-      }
+          if (channel === "telegram" && target) {
+            try {
+              const { armPairNotifyOnce } = await loadNotifyModule();
+              autoNotifyArmed = await armPairNotifyOnce({
+                api,
+                ctx: { ...ctx, assertOwnerCurrent },
+              });
+            } catch (err) {
+              api.logger.warn?.(
+                `device-pair: failed to arm one-shot pairing notify (${(err as Error)?.message ?? err})`,
+              );
+            }
+          }
 
-      const payload: SetupPayload = {
-        url: urlResult.url,
-        token: auth.token,
-        password: auth.password,
-      };
+          let payload = await issueSetupPayload(setupRequest);
+          let setupCode = encodeSetupCode(payload);
 
-      const channel = ctx.channel;
-      const target = ctx.senderId?.trim() || ctx.from?.trim() || ctx.to?.trim() || "";
-      const authLabel = auth.label ?? "auth";
+          const infoLines = buildQrInfoLines({
+            payload,
+            authLabel,
+            autoNotifyArmed,
+          });
 
-      if (channel === "telegram" && target) {
-        try {
-          const runtimeKeys = Object.keys(api.runtime ?? {});
-          const channelKeys = Object.keys(api.runtime?.channel ?? {});
-          api.logger.debug?.(
-            `device-pair: runtime keys=${runtimeKeys.join(",") || "none"} channel keys=${
-              channelKeys.join(",") || "none"
-            }`,
-          );
-          const send = api.runtime?.channel?.telegram?.sendMessageTelegram;
-          if (!send) {
-            throw new Error(
-              `telegram runtime unavailable (runtime keys: ${runtimeKeys.join(",")}; channel keys: ${channelKeys.join(
-                ",",
-              )})`,
+          if (target && QR_SUPPORTED_CHANNELS.has(channel)) {
+            let qrFilePath: string | undefined;
+            try {
+              const { resolvePreferredOpenClawTmpDir, writeQrPngTempFile } =
+                await loadDevicePairApiModule();
+              qrFilePath = (
+                await writeQrPngTempFile(setupCode, {
+                  tmpRoot: resolvePreferredOpenClawTmpDir(),
+                  dirPrefix: "device-pair-qr-",
+                  fileName: "pair-qr.png",
+                })
+              ).filePath;
+              const sent = await sendQrPngToSupportedChannel({
+                api,
+                ctx,
+                target,
+                caption: ["Scan this QR code with the OpenClaw iOS app:", "", ...infoLines].join(
+                  "\n",
+                ),
+                qrFilePath,
+              });
+              if (sent) {
+                return {
+                  text:
+                    `QR code sent above.\n` +
+                    `Expires: ${formatDurationMinutes(payload.expiresAtMs)}\n` +
+                    "IMPORTANT: Run /pair cleanup after pairing finishes.",
+                };
+              }
+            } catch (err) {
+              const { revokeDeviceBootstrapToken } = await loadDevicePairApiModule();
+              api.logger.warn?.(
+                `device-pair: QR image send failed channel=${channel}, falling back (${(err as Error)?.message ?? err})`,
+              );
+              await revokeDeviceBootstrapToken({ token: payload.bootstrapToken }).catch(() => {});
+              payload = await issueSetupPayload(setupRequest);
+              setupCode = encodeSetupCode(payload);
+            } finally {
+              if (qrFilePath) {
+                await rm(path.dirname(qrFilePath), { recursive: true, force: true }).catch(
+                  () => {},
+                );
+              }
+            }
+          }
+
+          api.logger.info?.(`device-pair: QR fallback channel=${channel} target=${target}`);
+          if (channel === "webchat") {
+            try {
+              const { renderQrPngDataUrl } = await loadDevicePairApiModule();
+              await renderQrPngDataUrl(setupCode);
+            } catch (err) {
+              const { revokeDeviceBootstrapToken } = await loadDevicePairApiModule();
+              api.logger.warn?.(
+                `device-pair: webchat QR render failed, falling back (${(err as Error)?.message ?? err})`,
+              );
+              await revokeDeviceBootstrapToken({ token: payload.bootstrapToken }).catch(() => {});
+              payload = await issueSetupPayload(setupRequest);
+              return {
+                text:
+                  "QR image delivery is not available on this channel right now, so I generated a pasteable setup code instead.\n\n" +
+                  formatSetupReply(payload, authLabel),
+              };
+            }
+            return {
+              text: [
+                "Scan this QR code with the OpenClaw iOS app:",
+                "",
+                buildQrInfoLines({
+                  payload,
+                  authLabel,
+                  autoNotifyArmed,
+                  markdown: true,
+                }).join("\n"),
+              ].join("\n"),
+              channelData: {
+                openclawPairingQr: { setupCode, expiresAtMs: payload.expiresAtMs },
+              },
+              sensitiveMedia: true,
+            };
+          }
+
+          return {
+            text:
+              "QR image delivery is not available on this channel, so I generated a pasteable setup code instead.\n\n" +
+              formatSetupReply(payload, authLabel),
+          };
+        }
+        const channel = ctx.channel;
+        const target =
+          normalizeOptionalString(ctx.senderId) ||
+          normalizeOptionalString(ctx.from) ||
+          normalizeOptionalString(ctx.to) ||
+          "";
+        const payload = await issueSetupPayload(setupRequest);
+
+        if (channel === "telegram" && target) {
+          try {
+            const runtimeKeys = Object.keys(api.runtime ?? {});
+            const channelKeys = Object.keys(api.runtime?.channel ?? {});
+            api.logger.debug?.(
+              `device-pair: runtime keys=${runtimeKeys.join(",") || "none"} channel keys=${
+                channelKeys.join(",") || "none"
+              }`,
+            );
+            const adapter = await api.runtime.channel.outbound.loadAdapter("telegram");
+            const send = adapter?.sendText;
+            if (!send) {
+              throw new Error(
+                `telegram runtime unavailable (runtime keys: ${runtimeKeys.join(",")}; channel keys: ${channelKeys.join(
+                  ",",
+                )})`,
+              );
+            }
+            await send({
+              cfg: api.config,
+              to: target,
+              text: formatSetupInstructions(payload.expiresAtMs),
+              ...(ctx.messageThreadId != null ? { threadId: ctx.messageThreadId } : {}),
+              ...(ctx.accountId ? { accountId: ctx.accountId } : {}),
+            });
+            api.logger.info?.(
+              `device-pair: telegram split send ok target=${target} account=${ctx.accountId ?? "none"} thread=${
+                ctx.messageThreadId ?? "none"
+              }`,
+            );
+            return { text: encodeSetupCode(payload) };
+          } catch (err) {
+            api.logger.warn?.(
+              `device-pair: telegram split send failed, falling back to single message (${(err as Error)?.message ?? err})`,
             );
           }
-          await send(target, formatSetupInstructions(), {
-            ...(ctx.messageThreadId != null ? { messageThreadId: ctx.messageThreadId } : {}),
-            ...(ctx.accountId ? { accountId: ctx.accountId } : {}),
-          });
-          api.logger.info?.(
-            `device-pair: telegram split send ok target=${target} account=${ctx.accountId ?? "none"} thread=${
-              ctx.messageThreadId ?? "none"
-            }`,
-          );
-          return { text: encodeSetupCode(payload) };
-        } catch (err) {
-          api.logger.warn?.(
-            `device-pair: telegram split send failed, falling back to single message (${String(
-              (err as Error)?.message ?? err,
-            )})`,
-          );
         }
-      }
-
-      return {
-        text: formatSetupReply(payload, authLabel),
-      };
-    },
-  });
-}
+        return {
+          text: formatSetupReply(payload, authLabel),
+        };
+      },
+    });
+  },
+});

@@ -1,10 +1,27 @@
-import { ConsoleLogger, LogService } from "@vector-im/matrix-bot-sdk";
+import {
+  logger as matrixJsSdkRootLogger,
+  type Logger as MatrixJsSdkLogger,
+} from "matrix-js-sdk/lib/logger.js";
+import { emitMatrixLog, setMatrixLogServiceQuiet } from "../sdk/logger.js";
 
 let matrixSdkLoggingConfigured = false;
-const matrixSdkBaseLogger = new ConsoleLogger();
+let matrixSdkLogMode: "default" | "quiet" = "default";
+let matrixJsSdkRootLoggerSnapshot: MatrixJsSdkRootLoggerSnapshot | null = null;
+
+type MatrixJsSdkLoglevelLogger = {
+  getLevel?: () => number | string;
+  methodFactory?: unknown;
+  rebuild?: () => void;
+  setLevel?: (level: number | string, persist?: boolean) => void;
+};
+
+type MatrixJsSdkRootLoggerSnapshot = {
+  level?: number | string;
+  methodFactory?: unknown;
+};
 
 function shouldSuppressMatrixHttpNotFound(module: string, messageOrObject: unknown[]): boolean {
-  if (module !== "MatrixHttpClient") {
+  if (!module.includes("MatrixHttpClient")) {
     return false;
   }
   return messageOrObject.some((entry) => {
@@ -16,21 +33,68 @@ function shouldSuppressMatrixHttpNotFound(module: string, messageOrObject: unkno
 }
 
 export function ensureMatrixSdkLoggingConfigured(): void {
-  if (matrixSdkLoggingConfigured) {
+  matrixSdkLoggingConfigured = true;
+  applyMatrixSdkLogger();
+}
+
+export function setMatrixSdkLogMode(mode: "default" | "quiet"): void {
+  matrixSdkLogMode = mode;
+  if (!matrixSdkLoggingConfigured) {
     return;
   }
-  matrixSdkLoggingConfigured = true;
+  applyMatrixSdkLogger();
+}
 
-  LogService.setLogger({
-    trace: (module, ...messageOrObject) => matrixSdkBaseLogger.trace(module, ...messageOrObject),
-    debug: (module, ...messageOrObject) => matrixSdkBaseLogger.debug(module, ...messageOrObject),
-    info: (module, ...messageOrObject) => matrixSdkBaseLogger.info(module, ...messageOrObject),
-    warn: (module, ...messageOrObject) => matrixSdkBaseLogger.warn(module, ...messageOrObject),
-    error: (module, ...messageOrObject) => {
-      if (shouldSuppressMatrixHttpNotFound(module, messageOrObject)) {
+function applyMatrixSdkLogger(): void {
+  setMatrixJsSdkRootLoggerLevel(matrixSdkLogMode === "quiet" ? "silent" : "debug");
+  setMatrixLogServiceQuiet(matrixSdkLogMode === "quiet");
+}
+
+function setMatrixJsSdkRootLoggerLevel(level: "debug" | "silent"): void {
+  const logger = matrixJsSdkRootLogger as unknown as MatrixJsSdkLoglevelLogger;
+  matrixJsSdkRootLoggerSnapshot ??= {
+    level: logger.getLevel?.(),
+    methodFactory: logger.methodFactory,
+  };
+  if (level === "silent") {
+    logger.methodFactory = () => () => undefined;
+    logger.setLevel?.("silent", false);
+    logger.rebuild?.();
+    return;
+  }
+  logger.methodFactory = matrixJsSdkRootLoggerSnapshot.methodFactory;
+  const previousLevel = matrixJsSdkRootLoggerSnapshot.level;
+  if (typeof previousLevel === "string" || typeof previousLevel === "number") {
+    logger.setLevel?.(previousLevel, false);
+  }
+  logger.rebuild?.();
+}
+
+export function createMatrixJsSdkClientLogger(prefix = "matrix"): MatrixJsSdkLogger {
+  const log = (
+    method: Parameters<typeof emitMatrixLog>[0],
+    ...messageOrObject: unknown[]
+  ): void => {
+    if (matrixSdkLogMode === "quiet") {
+      return;
+    }
+    emitMatrixLog(method, prefix, messageOrObject);
+  };
+
+  return {
+    trace: (...messageOrObject) => log("debug", ...messageOrObject),
+    debug: (...messageOrObject) => log("debug", ...messageOrObject),
+    info: (...messageOrObject) => log("info", ...messageOrObject),
+    warn: (...messageOrObject) => log("warn", ...messageOrObject),
+    error: (...messageOrObject) => {
+      if (shouldSuppressMatrixHttpNotFound(prefix, messageOrObject)) {
         return;
       }
-      matrixSdkBaseLogger.error(module, ...messageOrObject);
+      log("error", ...messageOrObject);
     },
-  });
+    getChild: (namespace: string) => {
+      const nextNamespace = namespace.trim();
+      return createMatrixJsSdkClientLogger(nextNamespace ? `${prefix}.${nextNamespace}` : prefix);
+    },
+  };
 }

@@ -1,26 +1,57 @@
-import type { MSTeamsAttachmentLike } from "./types.js";
+import { Buffer } from "node:buffer";
+import { lookup } from "node:dns/promises";
+import { responseWithRelease } from "openclaw/plugin-sdk/fetch-runtime";
+import {
+  buildHostnameAllowlistPolicyFromSuffixAllowlist as resolveMediaSsrfPolicy,
+  isHttpsUrlAllowedByHostnameSuffixAllowlist as isUrlAllowed,
+  normalizeHostnameSuffixAllowlist,
+} from "openclaw/plugin-sdk/ssrf-policy";
+import { fetchWithSsrFGuard, type LookupFn } from "openclaw/plugin-sdk/ssrf-runtime";
+import {
+  isRecord,
+  normalizeLowercaseStringOrEmpty,
+  normalizeOptionalString,
+} from "openclaw/plugin-sdk/string-coerce-runtime";
+import type { MSTeamsMonitorLogger } from "../monitor-types.js";
+import { MSTEAMS_REQUEST_TIMEOUT_MS } from "../request-timeout.js";
+import type { MSTeamsAttachmentLike, MSTeamsInboundMedia } from "./types.js";
 
-type InlineImageCandidate =
+type InlineImageReference =
   | {
       kind: "data";
-      data: Buffer;
-      contentType?: string;
-      placeholder: string;
+      src: string;
+      sourceId?: string;
     }
   | {
       kind: "url";
       url: string;
       contentType?: string;
       fileHint?: string;
-      placeholder: string;
-    };
+      sourceId?: string;
+    }
+  | { kind: "unavailable"; sourceId?: string };
 
-export const IMAGE_EXT_RE = /\.(avif|bmp|gif|heic|heif|jpe?g|png|tiff?|webp)$/i;
+const IMAGE_EXT_RE = /\.(avif|bmp|gif|heic|heif|jpe?g|png|tiff?|webp)$/i;
 
 export const IMG_SRC_RE = /<img[^>]+src=["']([^"']+)["'][^>]*>/gi;
 export const ATTACHMENT_TAG_RE = /<attachment[^>]+id=["']([^"']+)["'][^>]*>/gi;
+const GRAPH_HOSTED_CONTENT_SRC_RE = /\/hostedContents\/([^/?#]+)/i;
 
-export const DEFAULT_MEDIA_HOST_ALLOWLIST = [
+function resolveInlineImageSourceId(src: string): string {
+  // Graph fallback names hosted content by item ID, while activity HTML carries its `$value` URL.
+  // Normalize both paths to one identity so a recovered image replaces its advertised slot.
+  const hostedContentId = GRAPH_HOSTED_CONTENT_SRC_RE.exec(src)?.[1];
+  if (!hostedContentId) {
+    return src;
+  }
+  try {
+    return decodeURIComponent(hostedContentId);
+  } catch {
+    return hostedContentId;
+  }
+}
+
+const DEFAULT_MEDIA_HOST_ALLOWLIST = [
   "graph.microsoft.com",
   "graph.microsoft.us",
   "graph.microsoft.de",
@@ -43,14 +74,19 @@ export const DEFAULT_MEDIA_HOST_ALLOWLIST = [
   "media.ams.skype.com",
   // Bot Framework attachment URLs
   "trafficmanager.net",
+  "botframework.azure.cn",
   "blob.core.windows.net",
   "azureedge.net",
   "microsoft.com",
 ] as const;
 
-export const DEFAULT_MEDIA_AUTH_HOST_ALLOWLIST = [
+const DEFAULT_MEDIA_AUTH_HOST_ALLOWLIST = [
   "api.botframework.com",
   "botframework.com",
+  // Bot Framework Service URL (smba.trafficmanager.net) used for outbound
+  // replies and inbound attachment downloads (clipboard-pasted images).
+  "smba.trafficmanager.net",
+  "botframework.azure.cn",
   "graph.microsoft.com",
   "graph.microsoft.us",
   "graph.microsoft.de",
@@ -59,31 +95,83 @@ export const DEFAULT_MEDIA_AUTH_HOST_ALLOWLIST = [
 
 export const GRAPH_ROOT = "https://graph.microsoft.com/v1.0";
 
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+/**
+ * Host suffixes for SharePoint/OneDrive shared links that must be fetched via
+ * the Graph `/shares/{shareId}/driveItem/content` endpoint instead of directly.
+ *
+ * Direct fetches of SharePoint/OneDrive shared URLs return empty/HTML landing
+ * pages unless encoded as a Graph share id. See
+ * https://learn.microsoft.com/en-us/graph/api/shares-get for the encoding.
+ */
+const GRAPH_SHARED_LINK_HOST_SUFFIXES = [
+  ".sharepoint.com",
+  ".sharepoint.us",
+  ".sharepoint.de",
+  ".sharepoint.cn",
+  ".sharepoint-df.com",
+  "1drv.ms",
+  "onedrive.live.com",
+  "onedrive.com",
+] as const;
+
+function isGraphSharedLinkUrl(url: string): boolean {
+  const parsed = URL.parse(url);
+  if (!parsed) {
+    return false;
+  }
+  const host = normalizeLowercaseStringOrEmpty(parsed.hostname);
+  if (parsed.protocol !== "https:" || !host) {
+    return false;
+  }
+  // Only HTTPS URLs on a DNS label boundary may select the authenticated Graph path.
+  return GRAPH_SHARED_LINK_HOST_SUFFIXES.some(
+    (suffix) => host === suffix || host.endsWith(suffix.startsWith(".") ? suffix : `.${suffix}`),
+  );
+}
+
+/**
+ * Encode a SharePoint/OneDrive URL as a Graph shareId using the documented
+ * `u!` + base64url (no padding) scheme:
+ * https://learn.microsoft.com/en-us/graph/api/shares-get#encoding-sharing-urls
+ */
+export function encodeGraphShareId(url: string): string {
+  return `u!${Buffer.from(url, "utf8").toString("base64url")}`;
+}
+
+export function tryBuildGraphSharesUrlForSharedLink(url: string): string | undefined {
+  if (!isGraphSharedLinkUrl(url)) {
+    return undefined;
+  }
+  return `${GRAPH_ROOT}/shares/${encodeGraphShareId(url)}/driveItem/content`;
 }
 
 export function normalizeContentType(value: unknown): string | undefined {
-  if (typeof value !== "string") {
+  const trimmed = normalizeOptionalString(value);
+  if (!trimmed) {
     return undefined;
   }
-  const trimmed = value.trim();
-  return trimmed ? trimmed : undefined;
+  // RFC 2045 makes the media type case-insensitive, but parameter values may
+  // remain case-sensitive, so normalize only the type before the first `;`.
+  const parameterIndex = trimmed.indexOf(";");
+  if (parameterIndex === -1) {
+    return trimmed.toLowerCase();
+  }
+  return `${trimmed.slice(0, parameterIndex).trim().toLowerCase()}${trimmed.slice(parameterIndex)}`;
 }
 
-export function inferPlaceholder(params: {
+export function resolveMSTeamsMediaKind(params: {
   contentType?: string;
   fileName?: string;
   fileType?: string;
-}): string {
-  const mime = params.contentType?.toLowerCase() ?? "";
-  const name = params.fileName?.toLowerCase() ?? "";
-  const fileType = params.fileType?.toLowerCase() ?? "";
+}): MSTeamsInboundMedia["kind"] {
+  const mime = normalizeLowercaseStringOrEmpty(params.contentType);
+  const name = normalizeLowercaseStringOrEmpty(params.fileName);
+  const fileType = normalizeLowercaseStringOrEmpty(params.fileType);
 
   const looksLikeImage =
     mime.startsWith("image/") || IMAGE_EXT_RE.test(name) || IMAGE_EXT_RE.test(`x.${fileType}`);
 
-  return looksLikeImage ? "<media:image>" : "<media:document>";
+  return looksLikeImage ? "image" : "document";
 }
 
 export function isLikelyImageAttachment(att: MSTeamsAttachmentLike): boolean {
@@ -113,14 +201,9 @@ export function isLikelyImageAttachment(att: MSTeamsAttachmentLike): boolean {
   return false;
 }
 
-/**
- * Returns true if the attachment can be downloaded (any file type).
- * Used when downloading all files, not just images.
- */
 export function isDownloadableAttachment(att: MSTeamsAttachmentLike): boolean {
   const contentType = normalizeContentType(att.contentType) ?? "";
 
-  // Teams file download info always has a downloadUrl
   if (
     contentType === "application/vnd.microsoft.teams.file.download.info" &&
     isRecord(att.content) &&
@@ -129,21 +212,28 @@ export function isDownloadableAttachment(att: MSTeamsAttachmentLike): boolean {
     return true;
   }
 
-  // Any attachment with a contentUrl can be downloaded
-  if (typeof att.contentUrl === "string" && att.contentUrl.trim()) {
-    return true;
-  }
-
-  return false;
+  return typeof att.contentUrl === "string" && Boolean(att.contentUrl.trim());
 }
 
-function isHtmlAttachment(att: MSTeamsAttachmentLike): boolean {
-  const contentType = normalizeContentType(att.contentType) ?? "";
-  return contentType.startsWith("text/html");
+export function isAdvertisedFileAttachment(attachment: MSTeamsAttachmentLike): boolean {
+  const contentType = normalizeContentType(attachment.contentType) ?? "";
+  if (
+    contentType.startsWith("text/html") ||
+    contentType.startsWith("application/vnd.microsoft.card.") ||
+    contentType.startsWith("application/vnd.microsoft.teams.card.")
+  ) {
+    return false;
+  }
+  return Boolean(
+    isDownloadableAttachment(attachment) ||
+    isLikelyImageAttachment(attachment) ||
+    attachment.name?.trim() ||
+    contentType,
+  );
 }
 
 export function extractHtmlFromAttachment(att: MSTeamsAttachmentLike): string | undefined {
-  if (!isHtmlAttachment(att)) {
+  if (!normalizeContentType(att.contentType)?.startsWith("text/html")) {
     return undefined;
   }
   if (typeof att.content === "string") {
@@ -152,140 +242,189 @@ export function extractHtmlFromAttachment(att: MSTeamsAttachmentLike): string | 
   if (!isRecord(att.content)) {
     return undefined;
   }
-  const text =
-    typeof att.content.text === "string"
-      ? att.content.text
-      : typeof att.content.body === "string"
-        ? att.content.body
-        : typeof att.content.content === "string"
-          ? att.content.content
-          : undefined;
-  return text;
-}
-
-function decodeDataImage(src: string): InlineImageCandidate | null {
-  const match = /^data:(image\/[a-z0-9.+-]+)?(;base64)?,(.*)$/i.exec(src);
-  if (!match) {
-    return null;
-  }
-  const contentType = match[1]?.toLowerCase();
-  const isBase64 = Boolean(match[2]);
-  if (!isBase64) {
-    return null;
-  }
-  const payload = match[3] ?? "";
-  if (!payload) {
-    return null;
-  }
-  try {
-    const data = Buffer.from(payload, "base64");
-    return { kind: "data", data, contentType, placeholder: "<media:image>" };
-  } catch {
-    return null;
-  }
+  return typeof att.content.text === "string"
+    ? att.content.text
+    : typeof att.content.body === "string"
+      ? att.content.body
+      : typeof att.content.content === "string"
+        ? att.content.content
+        : undefined;
 }
 
 function fileHintFromUrl(src: string): string | undefined {
-  try {
-    const url = new URL(src);
-    const name = url.pathname.split("/").pop();
-    return name || undefined;
-  } catch {
-    return undefined;
-  }
+  return URL.parse(src)?.pathname.split("/").pop() || undefined;
 }
 
-export function extractInlineImageCandidates(
+export function extractInlineImageReferences(
   attachments: MSTeamsAttachmentLike[],
-): InlineImageCandidate[] {
-  const out: InlineImageCandidate[] = [];
+): InlineImageReference[] {
+  const out: InlineImageReference[] = [];
+  const seenReferences = new Set<string>();
+  const representedAttachmentIds = new Set(
+    attachments.flatMap((attachment) => {
+      const id = attachment.id?.trim();
+      return id && !extractHtmlFromAttachment(attachment) ? [id] : [];
+    }),
+  );
   for (const att of attachments) {
     const html = extractHtmlFromAttachment(att);
     if (!html) {
       continue;
     }
     IMG_SRC_RE.lastIndex = 0;
-    let match: RegExpExecArray | null = IMG_SRC_RE.exec(html);
-    while (match) {
+    for (const match of html.matchAll(IMG_SRC_RE)) {
       const src = match[1]?.trim();
-      if (src && !src.startsWith("cid:")) {
+      if (src) {
         if (src.startsWith("data:")) {
-          const decoded = decodeDataImage(src);
-          if (decoded) {
-            out.push(decoded);
+          out.push({ kind: "data", src });
+        } else if (!seenReferences.has(src)) {
+          seenReferences.add(src);
+          if (src.startsWith("cid:")) {
+            const sourceId = src.slice("cid:".length) || undefined;
+            if (!sourceId || !representedAttachmentIds.has(sourceId)) {
+              out.push({ kind: "unavailable", sourceId });
+            }
+            continue;
           }
-        } else {
           out.push({
             kind: "url",
             url: src,
             fileHint: fileHintFromUrl(src),
-            placeholder: "<media:image>",
+            sourceId: resolveInlineImageSourceId(src),
           });
         }
       }
-      match = IMG_SRC_RE.exec(html);
     }
   }
   return out;
 }
 
 export function safeHostForUrl(url: string): string {
-  try {
-    return new URL(url).hostname.toLowerCase();
-  } catch {
-    return "invalid-url";
-  }
+  const parsed = URL.parse(url);
+  return parsed ? normalizeLowercaseStringOrEmpty(parsed.hostname) : "invalid-url";
 }
 
-function normalizeAllowHost(value: string): string {
-  const trimmed = value.trim().toLowerCase();
-  if (!trimmed) {
-    return "";
-  }
-  if (trimmed === "*") {
-    return "*";
-  }
-  return trimmed.replace(/^\*\.?/, "");
+export type MSTeamsAttachmentFetchPolicy = {
+  allowHosts: string[];
+  authAllowHosts: string[];
+};
+
+export type MSTeamsAttachmentDownloadLogger = Partial<
+  Pick<MSTeamsMonitorLogger, "debug" | "warn" | "error">
+>;
+
+export type MSTeamsAttachmentResolveFn = (hostname: string) => Promise<{ address: string }>;
+
+function isMockFetchFn(fetchFn: typeof fetch): boolean {
+  const candidate = fetchFn as unknown as { mock?: unknown };
+  return Boolean(candidate.mock || Object.hasOwn(candidate, "_isMockFunction"));
 }
 
-export function resolveAllowedHosts(input?: string[]): string[] {
-  if (!Array.isArray(input) || input.length === 0) {
-    return DEFAULT_MEDIA_HOST_ALLOWLIST.slice();
+function resolveGuardedFetchImpl(fetchFn?: typeof fetch): typeof fetch | undefined {
+  if (!fetchFn) {
+    return undefined;
   }
-  const normalized = input.map(normalizeAllowHost).filter(Boolean);
-  if (normalized.includes("*")) {
+  if (fetchFn === fetch || fetchFn === globalThis.fetch || isMockFetchFn(fetchFn)) {
+    return fetchFn;
+  }
+  throw new Error(
+    "MSTeams attachment fetchFn must set fetchFnSupportsDispatcher to use guarded DNS pinning",
+  );
+}
+
+function resolveRetainedAuthorizationRedirectHostnameAllowlist(
+  input?: string[],
+): string[] | undefined {
+  if (!input) {
+    return undefined;
+  }
+  if (input.includes("*")) {
     return ["*"];
   }
-  return normalized;
+  return resolveMediaSsrfPolicy(input)?.hostnameAllowlist;
 }
 
-export function resolveAuthAllowedHosts(input?: string[]): string[] {
-  if (!Array.isArray(input) || input.length === 0) {
-    return DEFAULT_MEDIA_AUTH_HOST_ALLOWLIST.slice();
-  }
-  const normalized = input.map(normalizeAllowHost).filter(Boolean);
-  if (normalized.includes("*")) {
-    return ["*"];
-  }
-  return normalized;
+export function resolveAttachmentFetchPolicy(params?: {
+  allowHosts?: string[];
+  authAllowHosts?: string[];
+}): MSTeamsAttachmentFetchPolicy {
+  return {
+    allowHosts: normalizeHostnameSuffixAllowlist(params?.allowHosts, DEFAULT_MEDIA_HOST_ALLOWLIST),
+    authAllowHosts: normalizeHostnameSuffixAllowlist(
+      params?.authAllowHosts,
+      DEFAULT_MEDIA_AUTH_HOST_ALLOWLIST,
+    ),
+  };
 }
 
-function isHostAllowed(host: string, allowlist: string[]): boolean {
-  if (allowlist.includes("*")) {
-    return true;
+export function applyAuthorizationHeaderForUrl(params: {
+  headers: Headers;
+  url: string;
+  authAllowHosts: string[];
+  bearerToken?: string;
+}): void {
+  if (params.bearerToken && isUrlAllowed(params.url, params.authAllowHosts)) {
+    params.headers.set("Authorization", `Bearer ${params.bearerToken}`);
+  } else {
+    params.headers.delete("Authorization");
   }
-  const normalized = host.toLowerCase();
-  return allowlist.some((entry) => normalized === entry || normalized.endsWith(`.${entry}`));
 }
 
-export function isUrlAllowed(url: string, allowlist: string[]): boolean {
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol !== "https:") {
-      return false;
-    }
-    return isHostAllowed(parsed.hostname, allowlist);
-  } catch {
-    return false;
+const MAX_SAFE_REDIRECTS = 5;
+export function isRedirectStatus(status: number): boolean {
+  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
+}
+
+/**
+ * Fetch a URL with redirect: "manual", validating each redirect target
+ * against the hostname allowlist and optional DNS-resolved IP (anti-SSRF).
+ *
+ * This prevents:
+ * - Auto-following redirects to non-allowlisted hosts
+ * - DNS rebinding attacks when a lookup function is provided
+ */
+export async function safeFetchWithPolicy(params: {
+  url: string;
+  policy: MSTeamsAttachmentFetchPolicy;
+  fetchFn?: typeof fetch;
+  requestInit?: RequestInit;
+  resolveFn?: MSTeamsAttachmentResolveFn;
+  timeoutMs?: number;
+}): Promise<Response> {
+  const { allowHosts, authAllowHosts } = params.policy;
+  const resolveFn = params.resolveFn ?? lookup;
+  const currentHeaders = new Headers(params.requestInit?.headers);
+  const currentUrl = params.url;
+
+  if (!isUrlAllowed(currentUrl, allowHosts)) {
+    throw new Error(`Initial download URL blocked: ${currentUrl}`);
   }
+
+  // Authorization is only allowed on explicitly auth-allowlisted hosts, including
+  // the first hop. Redirect hops apply the same rule in fetchWithSsrFGuard.
+  if (currentHeaders.has("authorization") && !isUrlAllowed(currentUrl, authAllowHosts)) {
+    currentHeaders.delete("authorization");
+  }
+
+  const lookupFn: LookupFn = async (hostname) => {
+    const resolved = await resolveFn(hostname);
+    return [{ ...resolved, family: resolved.address.includes(":") ? 6 : 4 }];
+  };
+  const guarded = await fetchWithSsrFGuard({
+    url: currentUrl,
+    fetchImpl: resolveGuardedFetchImpl(params.fetchFn),
+    init: {
+      ...params.requestInit,
+      headers: currentHeaders,
+    },
+    maxRedirects: MAX_SAFE_REDIRECTS,
+    requireHttps: true,
+    policy: resolveMediaSsrfPolicy(allowHosts),
+    lookupFn,
+    retainAuthorizationRedirectHostnameAllowlist:
+      resolveRetainedAuthorizationRedirectHostnameAllowlist(authAllowHosts),
+    auditContext: "msteams.attachment",
+    timeoutMs: params.timeoutMs ?? MSTEAMS_REQUEST_TIMEOUT_MS,
+  });
+  return responseWithRelease(guarded.response, guarded.release);
 }

@@ -1,168 +1,78 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+// Verifies agents_list reports only subagents visible to the requester.
+import { describe, expect, it, vi } from "vitest";
+import { createPerSenderSessionConfig } from "./test-helpers/session-config.js";
+import { createAgentsListTool } from "./tools/agents-list-tool.js";
 
-let configOverride: ReturnType<(typeof import("../config/config.js"))["loadConfig"]> = {
-  session: {
-    mainKey: "main",
-    scope: "per-sender",
-  },
+let configOverride: ReturnType<(typeof import("../config/config.js"))["getRuntimeConfig"]> = {
+  session: createPerSenderSessionConfig(),
 };
 
-vi.mock("../config/config.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../config/config.js")>();
+vi.mock("../config/config.js", async () => {
+  const actual = await vi.importActual<typeof import("../config/config.js")>("../config/config.js");
   return {
     ...actual,
-    loadConfig: () => configOverride,
+    getRuntimeConfig: () => configOverride,
     resolveGatewayPort: () => 18789,
   };
 });
 
-import "./test-helpers/fast-core-tools.js";
-import { createOpenClawTools } from "./openclaw-tools.js";
-
 describe("agents_list", () => {
-  beforeEach(() => {
+  type AgentEntries = NonNullable<NonNullable<typeof configOverride.agents>["entries"]>;
+
+  function setConfigWithAgentEntries(entries: AgentEntries) {
+    // Each test gets a fresh per-sender session config plus its agent roster.
     configOverride = {
-      session: {
-        mainKey: "main",
-        scope: "per-sender",
-      },
-    };
-  });
-
-  it("defaults to the requester agent only", async () => {
-    const tool = createOpenClawTools({
-      agentSessionKey: "main",
-    }).find((candidate) => candidate.name === "agents_list");
-    if (!tool) {
-      throw new Error("missing agents_list tool");
-    }
-
-    const result = await tool.execute("call1", {});
-    expect(result.details).toMatchObject({
-      requester: "main",
-      allowAny: false,
-    });
-    const agents = (result.details as { agents?: Array<{ id: string }> }).agents;
-    expect(agents?.map((agent) => agent.id)).toEqual(["main"]);
-  });
-
-  it("includes allowlisted targets plus requester", async () => {
-    configOverride = {
-      session: {
-        mainKey: "main",
-        scope: "per-sender",
-      },
+      session: createPerSenderSessionConfig(),
       agents: {
-        list: [
-          {
-            id: "main",
-            name: "Main",
-            subagents: {
-              allowAgents: ["research"],
-            },
-          },
-          {
-            id: "research",
-            name: "Research",
-          },
-        ],
+        entries,
       },
     };
+  }
 
-    const tool = createOpenClawTools({
-      agentSessionKey: "main",
-    }).find((candidate) => candidate.name === "agents_list");
-    if (!tool) {
-      throw new Error("missing agents_list tool");
-    }
+  function createTool() {
+    return createAgentsListTool({
+      agentSessionKey: "agent:main:main",
+    });
+  }
 
-    const result = await tool.execute("call2", {});
-    const agents = (
-      result.details as {
-        agents?: Array<{ id: string }>;
-      }
-    ).agents;
-    expect(agents?.map((agent) => agent.id)).toEqual(["main", "research"]);
+  function readAgentList(result: unknown) {
+    // Tool results expose the machine-readable agent list in details.
+    return (result as { details?: { agents?: Array<{ id: string; configured?: boolean }> } })
+      .details?.agents;
+  }
+
+  it("defaults to the requester when no agents are configured", async () => {
+    configOverride = { session: createPerSenderSessionConfig() };
+    const result = await createTool().execute("default", {});
+    expect(result.details).toMatchObject({ requester: "main", allowAny: false });
+    expect(readAgentList(result)?.map((agent) => agent.id)).toEqual(["main"]);
+  });
+
+  it("omits allowlisted targets that are not configured", async () => {
+    setConfigWithAgentEntries({ main: { subagents: { allowAgents: ["research"] } } });
+    expect(readAgentList(await createTool().execute("stale", {}))).toEqual([]);
   });
 
   it("returns configured agents when allowlist is *", async () => {
-    configOverride = {
-      session: {
-        mainKey: "main",
-        scope: "per-sender",
+    setConfigWithAgentEntries({
+      main: {
+        subagents: {
+          allowAgents: ["*"],
+        },
       },
-      agents: {
-        list: [
-          {
-            id: "main",
-            subagents: {
-              allowAgents: ["*"],
-            },
-          },
-          {
-            id: "research",
-            name: "Research",
-          },
-          {
-            id: "coder",
-            name: "Coder",
-          },
-        ],
+      research: {
+        name: "Research",
       },
-    };
-
-    const tool = createOpenClawTools({
-      agentSessionKey: "main",
-    }).find((candidate) => candidate.name === "agents_list");
-    if (!tool) {
-      throw new Error("missing agents_list tool");
-    }
-
-    const result = await tool.execute("call3", {});
-    expect(result.details).toMatchObject({
-      allowAny: true,
+      coder: {
+        name: "Coder",
+      },
     });
-    const agents = (
-      result.details as {
-        agents?: Array<{ id: string }>;
-      }
-    ).agents;
+
+    const tool = createTool();
+    const result = await tool.execute("call3", {});
+    const details = result.details as { allowAny?: boolean };
+    expect(details.allowAny).toBe(true);
+    const agents = readAgentList(result);
     expect(agents?.map((agent) => agent.id)).toEqual(["main", "coder", "research"]);
-  });
-
-  it("marks allowlisted-but-unconfigured agents", async () => {
-    configOverride = {
-      session: {
-        mainKey: "main",
-        scope: "per-sender",
-      },
-      agents: {
-        list: [
-          {
-            id: "main",
-            subagents: {
-              allowAgents: ["research"],
-            },
-          },
-        ],
-      },
-    };
-
-    const tool = createOpenClawTools({
-      agentSessionKey: "main",
-    }).find((candidate) => candidate.name === "agents_list");
-    if (!tool) {
-      throw new Error("missing agents_list tool");
-    }
-
-    const result = await tool.execute("call4", {});
-    const agents = (
-      result.details as {
-        agents?: Array<{ id: string; configured: boolean }>;
-      }
-    ).agents;
-    expect(agents?.map((agent) => agent.id)).toEqual(["main", "research"]);
-    const research = agents?.find((agent) => agent.id === "research");
-    expect(research?.configured).toBe(false);
   });
 });
