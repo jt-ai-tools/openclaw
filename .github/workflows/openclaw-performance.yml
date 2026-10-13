@@ -880,6 +880,10 @@ jobs:
               summary("Previous source performance baseline has no source directory.")
           PYTHON
 
+      - name: Install ripgrep for fork-hosted source probes
+        if: github.repository != 'openclaw/openclaw' && runner.os == 'Linux' && runner.environment == 'github-hosted'
+        uses: ./.artifacts/performance-workflow/.github/actions/setup-ripgrep
+
       - name: Run OpenClaw source performance probes
         shell: bash
         run: |

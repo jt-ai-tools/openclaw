@@ -1704,6 +1704,10 @@ jobs:
           cache-mode: restore
           install-bun: "false"
 
+      - name: Install ripgrep for fork-hosted ratchets
+        if: github.repository != 'openclaw/openclaw' && runner.os == 'Linux' && runner.environment == 'github-hosted' && github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.OPENCLAW_CI_ON_PUSH != 'true'
+        uses: ./.ci-harness/.github/actions/setup-ripgrep
+
       - name: Check main push ratchets and protocol additions
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.OPENCLAW_CI_ON_PUSH != 'true'
         env:
